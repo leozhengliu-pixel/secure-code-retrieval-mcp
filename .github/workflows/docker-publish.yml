@@ -71,9 +71,13 @@ jobs:
           openssl genrsa -out "$workdir/private.pem" 2048 >/dev/null 2>&1
           openssl rsa -in "$workdir/private.pem" -pubout -out "$workdir/public.pem" >/dev/null 2>&1
 
-          {
-            cat <<'EOF'
-log_level: info
+          WORKDIR="$workdir" python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          workdir = Path(os.environ["WORKDIR"])
+          public_key = workdir.joinpath("public.pem").read_text()
+          config = f"""log_level: info
 runtime:
   http_address: ":8080"
   request_timeout: 8s
@@ -83,10 +87,7 @@ auth:
   issuer: https://ci.local
   audience: secure-code-retrieval-mcp
   public_key_pem: |
-EOF
-            sed 's/^/    /' "$workdir/public.pem"
-            cat <<'EOF'
-  admin_role: scrm_admin
+{''.join(f'    {line}\n' for line in public_key.splitlines())}  admin_role: scrm_admin
 default_policy_profile: default
 connectors:
   github:
@@ -99,14 +100,9 @@ policies:
       - name: allow-basic
         action: allow
 models: []
-EOF
-          } >"$workdir/config.yaml"
-
-          sqlite3 "$workdir/secure-code-retrieval.db" < internal/storage/sqlite/migrations/0001_audit.sql
-          sqlite3 "$workdir/secure-code-retrieval.db" "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, '$(date -u +%Y-%m-%dT%H:%M:%SZ)');"
-
-          cat >"$workdir/mint_jwt.go" <<'EOF'
-package main
+"""
+          workdir.joinpath("config.yaml").write_text(config)
+          mint = """package main
 
 import (
   "crypto/rsa"
@@ -156,7 +152,12 @@ func main() {
   }
   fmt.Println(signed)
 }
-EOF
+"""
+          workdir.joinpath("mint_jwt.go").write_text(mint)
+          PY
+
+          sqlite3 "$workdir/secure-code-retrieval.db" < internal/storage/sqlite/migrations/0001_audit.sql
+          sqlite3 "$workdir/secure-code-retrieval.db" "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, '$(date -u +%Y-%m-%dT%H:%M:%SZ)');"
 
           token="$(go run "$workdir/mint_jwt.go" "$workdir/private.pem")"
           echo "workdir=$workdir" >>"$GITHUB_OUTPUT"
