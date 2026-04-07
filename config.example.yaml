@@ -1,0 +1,56 @@
+log_level: info
+runtime:
+  http_address: ":8080"
+  request_timeout: 8s
+network:
+  proxy:
+    enabled: true
+    url: http://proxy.internal.example.com:8080
+    no_proxy: .svc.cluster.local,localhost,127.0.0.1
+    username_env: PROXY_USERNAME
+    password_env: PROXY_PASSWORD
+database:
+  dsn: postgres://postgres:postgres@localhost:5432/secure_code_retrieval?sslmode=disable
+connectors:
+  github:
+    enabled: true
+    base_url: https://api.github.example.com
+    token_env: GITHUB_TOKEN
+  gitlab:
+    enabled: true
+    base_url: https://gitlab.example.com/api/v4
+    token_env: GITLAB_TOKEN
+    proxy:
+      enabled: false
+policies:
+  - name: default
+    tenant_id: tenant-1
+    repository_allow:
+      - acme/
+    path_deny:
+      - secrets/
+    rules:
+      - name: suppress-private-key
+        action: suppress
+        pattern: BEGIN PRIVATE KEY
+        export_allowed: false
+      - name: rewrite-internal-host
+        action: rewrite_required
+        pattern: internal\.corp
+        model_allowed: true
+        export_allowed: true
+      - name: mask-api-key
+        action: mask
+        pattern: '(?i)(api[_-]?key|token|secret)\s*[:=]\s*["'"'"'][^"'"'"']+["'"'"']'
+        export_allowed: true
+models:
+  - name: default-openai
+    provider_kind: openai_compatible
+    base_url: https://llm-gateway.example.com/v1/chat/completions
+    model: gpt-4.1-mini
+    api_key_env: OPENAI_API_KEY
+    timeout: 5s
+    proxy:
+      enabled: true
+      url: http://llm-proxy.internal.example.com:8080
+      no_proxy: localhost,127.0.0.1
