@@ -4,7 +4,6 @@ import "errors"
 
 var (
 	ErrInvalidRequest    = errors.New("invalid request")
-	ErrMissingTenant     = errors.New("missing tenant context")
 	ErrMissingPrincipal  = errors.New("missing caller principal")
 	ErrConnector         = errors.New("connector error")
 	ErrProxyConfig       = errors.New("proxy configuration error")
@@ -16,4 +15,7 @@ var (
 	ErrAuditPersistence  = errors.New("audit persistence error")
 	ErrUnsupportedFilter = errors.New("unsupported filter")
 	ErrUnauthorized      = errors.New("unauthorized")
+	ErrForbidden         = errors.New("forbidden")
+	ErrNotReady          = errors.New("not ready")
+	ErrNotFound          = errors.New("not found")
 )

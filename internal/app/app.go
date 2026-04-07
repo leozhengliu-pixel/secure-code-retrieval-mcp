@@ -8,11 +8,13 @@ import (
 	"time"
 
 	"secure-code-retrieval-mcp/internal/audit"
+	"secure-code-retrieval-mcp/internal/auth"
 	"secure-code-retrieval-mcp/internal/config"
 	ghconnector "secure-code-retrieval-mcp/internal/connectors/github"
 	glconnector "secure-code-retrieval-mcp/internal/connectors/gitlab"
 	"secure-code-retrieval-mcp/internal/gateway"
 	"secure-code-retrieval-mcp/internal/mcp"
+	"secure-code-retrieval-mcp/internal/metrics"
 	"secure-code-retrieval-mcp/internal/policy"
 	"secure-code-retrieval-mcp/internal/sanitize"
 	postgresstore "secure-code-retrieval-mcp/internal/storage/postgres"
@@ -29,6 +31,12 @@ func New(cfg config.Config, logger *slog.Logger) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
+	migrator := postgresstore.NewMigrator(repository.DB())
+	authService, err := auth.New(cfg.Auth)
+	if err != nil {
+		return nil, err
+	}
+	metricsRegistry := metrics.New()
 	auditor := audit.NewService(repository)
 	providerFactory := sanitize.NewProviderFactory(cfg.Models, cfg.Network.Proxy, logger)
 	sanitizer := sanitize.NewService(providerFactory, logger)
@@ -45,20 +53,40 @@ func New(cfg config.Config, logger *slog.Logger) (*Application, error) {
 		return nil, err
 	}
 	svc := gateway.NewService(gateway.Dependencies{
-		Logger:    logger,
-		Timeout:   cfg.Runtime.RequestTimeout,
-		GitHub:    githubConnector,
-		GitLab:    gitlabConnector,
-		Policy:    policyEngine,
-		Sanitizer: sanitizer,
-		Auditor:   auditor,
+		Logger:               logger,
+		Timeout:              cfg.Runtime.RequestTimeout,
+		DefaultPolicyProfile: cfg.DefaultPolicyProfile,
+		AdminRole:            cfg.Auth.AdminRole,
+		Metrics:              metricsRegistry,
+		GitHub:               githubConnector,
+		GitLab:               gitlabConnector,
+		Policy:               policyEngine,
+		Sanitizer:            sanitizer,
+		Auditor:              auditor,
+	})
+	readiness := newReadinessProbe(metricsRegistry, map[string]readinessCheck{
+		"database":   repository.Ping,
+		"migrations": migrator.CheckReady,
+		"auth":       func(context.Context) error { return nil },
+		"github": func(context.Context) error {
+			if cfg.Connectors.GitHub.Enabled && cfg.Connectors.GitHub.BaseURL == "" {
+				return errors.New("missing base url")
+			}
+			return nil
+		},
+		"gitlab": func(context.Context) error {
+			if cfg.Connectors.GitLab.Enabled && cfg.Connectors.GitLab.BaseURL == "" {
+				return errors.New("missing base url")
+			}
+			return nil
+		},
 	})
 	httpServer := &http.Server{
 		Addr:              cfg.Runtime.HTTPAddress,
-		Handler:           NewHTTPHandler(svc, logger),
+		Handler:           withMetrics(NewHTTPHandler(svc, authService, readiness, logger), metricsRegistry),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	mcpServer := mcp.NewServer(svc, logger)
+	mcpServer := mcp.NewServer(svc, logger, cfg.Auth.MCPPrincipal, cfg.Auth.MCPRoles)
 	return &Application{logger: logger, httpServer: httpServer, mcpServer: mcpServer}, nil
 }
 

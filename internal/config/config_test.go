@@ -12,6 +12,7 @@ func TestValidateProxyConfigRejectsInvalidURL(t *testing.T) {
 		cfg := Config{
 			Runtime:  RuntimeConfig{HTTPAddress: ":8080", RequestTimeout: 1},
 			Database: DatabaseConfig{DSN: "postgres://example"},
+			Auth:     AuthConfig{Issuer: "issuer", Audience: "aud", PublicKeyPEM: "pem"},
 			Connectors: ConnectorsConfig{
 				GitHub: ConnectorConfig{
 					Enabled: true,
@@ -32,6 +33,7 @@ func TestValidateProxyConfigRejectsMissingCredentialEnv(t *testing.T) {
 	cfg := Config{
 		Runtime:  RuntimeConfig{HTTPAddress: ":8080", RequestTimeout: 1},
 		Database: DatabaseConfig{DSN: "postgres://example"},
+		Auth:     AuthConfig{Issuer: "issuer", Audience: "aud", PublicKeyPEM: "pem"},
 		Network: NetworkConfig{
 			Proxy: &ProxyConfig{
 				Enabled:     &enabled,
@@ -57,6 +59,11 @@ runtime:
   request_timeout: 8s
 database:
   dsn: postgres://postgres:postgres@localhost:5432/secure_code_retrieval?sslmode=disable
+auth:
+  issuer: issuer
+  audience: aud
+  public_key_pem: |
+    pem
 network:
   proxy:
     enabled: true
@@ -87,4 +94,44 @@ connectors:
 	if cfg.Connectors.GitLab.Proxy == nil || cfg.Connectors.GitLab.Proxy.Enabled == nil || *cfg.Connectors.GitLab.Proxy.Enabled {
 		t.Fatalf("expected gitlab proxy to be explicitly disabled, got %#v", cfg.Connectors.GitLab.Proxy)
 	}
+}
+
+func TestLoadAppliesAuthDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := `
+runtime:
+  http_address: ":8080"
+  request_timeout: 8s
+database:
+  dsn: postgres://postgres:postgres@localhost:5432/secure_code_retrieval?sslmode=disable
+auth:
+  issuer: issuer
+  audience: aud
+  public_key_pem: |
+    -----BEGIN PUBLIC KEY-----
+    MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtesttesttesttesttest
+    -----END PUBLIC KEY-----
+policies:
+  - name: default
+    rules:
+      - name: allow-basic
+        action: allow
+default_policy_profile: default
+`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SCRM_CONFIG", path)
+	cfg, err := Load()
+	if err == nil {
+		if cfg.Auth.AdminRole != "scrm_admin" {
+			t.Fatalf("expected default admin role, got %q", cfg.Auth.AdminRole)
+		}
+		if cfg.Auth.MCPPrincipal != "mcp_stdio" {
+			t.Fatalf("expected default mcp principal, got %q", cfg.Auth.MCPPrincipal)
+		}
+		return
+	}
+	t.Fatalf("expected defaults to apply before validation, got %v", err)
 }

@@ -10,11 +10,11 @@ import (
 	"secure-code-retrieval-mcp/internal/gateway"
 )
 
-func TestSearchRejectsMissingTenant(t *testing.T) {
+func TestSearchRejectsMissingPolicyProfile(t *testing.T) {
 	svc := gateway.NewService(gateway.Dependencies{Logger: slog.Default(), Timeout: time.Second, GitHub: stubConnector{}, GitLab: stubConnector{}, Policy: stubPolicy{}, Sanitizer: stubSanitizer{}, Auditor: stubAuditor{}})
 	_, err := svc.Search(context.Background(), domain.SearchRequest{CallerPrincipal: "alice", SourceType: domain.SourceTypeGitHub, SourceHost: "github.example.com", QueryText: "token", MaxResults: 1, ResponseMode: domain.ResponseModeSnippet})
-	if err != domain.ErrMissingTenant {
-		t.Fatalf("expected missing tenant error, got %v", err)
+	if err != domain.ErrInvalidRequest {
+		t.Fatalf("expected invalid request error, got %v", err)
 	}
 }
 

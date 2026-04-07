@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -13,13 +14,15 @@ import (
 )
 
 type Config struct {
-	LogLevel   LogLevel         `yaml:"log_level"`
-	Runtime    RuntimeConfig    `yaml:"runtime"`
-	Network    NetworkConfig    `yaml:"network"`
-	Database   DatabaseConfig   `yaml:"database"`
-	Connectors ConnectorsConfig `yaml:"connectors"`
-	Policies   []PolicyProfile  `yaml:"policies"`
-	Models     []ModelEndpoint  `yaml:"models"`
+	LogLevel             LogLevel         `yaml:"log_level"`
+	Runtime              RuntimeConfig    `yaml:"runtime"`
+	Network              NetworkConfig    `yaml:"network"`
+	Database             DatabaseConfig   `yaml:"database"`
+	Connectors           ConnectorsConfig `yaml:"connectors"`
+	DefaultPolicyProfile string           `yaml:"default_policy_profile"`
+	Auth                 AuthConfig       `yaml:"auth"`
+	Policies             []PolicyProfile  `yaml:"policies"`
+	Models               []ModelEndpoint  `yaml:"models"`
 }
 
 type RuntimeConfig struct {
@@ -29,6 +32,16 @@ type RuntimeConfig struct {
 
 type DatabaseConfig struct {
 	DSN string `yaml:"dsn"`
+}
+
+type AuthConfig struct {
+	Issuer       string   `yaml:"issuer"`
+	Audience     string   `yaml:"audience"`
+	PublicKeyPEM string   `yaml:"public_key_pem"`
+	PublicKeyEnv string   `yaml:"public_key_env"`
+	AdminRole    string   `yaml:"admin_role"`
+	MCPPrincipal string   `yaml:"mcp_principal"`
+	MCPRoles     []string `yaml:"mcp_roles"`
 }
 
 type NetworkConfig struct {
@@ -59,7 +72,6 @@ type ProxyConfig struct {
 
 type PolicyProfile struct {
 	Name            string       `yaml:"name"`
-	TenantID        string       `yaml:"tenant_id"`
 	RepositoryAllow []string     `yaml:"repository_allow"`
 	RepositoryDeny  []string     `yaml:"repository_deny"`
 	PathAllow       []string     `yaml:"path_allow"`
@@ -106,6 +118,7 @@ func Load() (Config, error) {
 	path := os.Getenv("SCRM_CONFIG")
 	if path == "" {
 		cfg := defaultConfig()
+		cfg.applyDefaults()
 		return cfg, cfg.Validate()
 	}
 	data, err := os.ReadFile(path)
@@ -116,6 +129,7 @@ func Load() (Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, err
 	}
+	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -145,6 +159,18 @@ func (c Config) Validate() error {
 	if c.Database.DSN == "" {
 		return errors.New("database.dsn is required")
 	}
+	if c.Auth.Issuer == "" {
+		return errors.New("auth.issuer is required")
+	}
+	if c.Auth.Audience == "" {
+		return errors.New("auth.audience is required")
+	}
+	if c.Auth.PublicKeyPEM == "" && c.Auth.PublicKeyEnv == "" {
+		return errors.New("auth.public_key_pem or auth.public_key_env is required")
+	}
+	if c.Auth.PublicKeyPEM != "" && c.Auth.PublicKeyEnv != "" {
+		return errors.New("only one of auth.public_key_pem or auth.public_key_env may be set")
+	}
 	if err := validateProxyConfig("network.proxy", c.Network.Proxy); err != nil {
 		return err
 	}
@@ -168,6 +194,52 @@ func (c Config) Validate() error {
 	for idx, model := range c.Models {
 		if err := validateProxyConfig(fmt.Sprintf("models[%d].proxy", idx), model.Proxy); err != nil {
 			return err
+		}
+	}
+	seenProfiles := make(map[string]struct{}, len(c.Policies))
+	for idx, policy := range c.Policies {
+		if policy.Name == "" {
+			return fmt.Errorf("policies[%d].name is required", idx)
+		}
+		if _, exists := seenProfiles[policy.Name]; exists {
+			return fmt.Errorf("duplicate policy profile %q", policy.Name)
+		}
+		seenProfiles[policy.Name] = struct{}{}
+		for ridx, rule := range policy.Rules {
+			if err := validatePolicyRule(fmt.Sprintf("policies[%d].rules[%d]", idx, ridx), rule); err != nil {
+				return err
+			}
+		}
+	}
+	if c.DefaultPolicyProfile != "" {
+		if _, ok := seenProfiles[c.DefaultPolicyProfile]; !ok {
+			return fmt.Errorf("default_policy_profile %q not found", c.DefaultPolicyProfile)
+		}
+	}
+	return nil
+}
+
+func (c *Config) applyDefaults() {
+	if c.Auth.AdminRole == "" {
+		c.Auth.AdminRole = "scrm_admin"
+	}
+	if c.Auth.MCPPrincipal == "" {
+		c.Auth.MCPPrincipal = "mcp_stdio"
+	}
+}
+
+func validatePolicyRule(name string, rule PolicyRule) error {
+	switch rule.Action {
+	case string("allow"), string("mask"), string("rewrite_required"), string("suppress"):
+	default:
+		return fmt.Errorf("%s.action must be one of allow, mask, rewrite_required, suppress", name)
+	}
+	if rule.Literal == "" && rule.Pattern == "" && rule.Action != "allow" {
+		return fmt.Errorf("%s must set literal or pattern", name)
+	}
+	if rule.Pattern != "" {
+		if _, err := regexp.Compile(rule.Pattern); err != nil {
+			return fmt.Errorf("%s.pattern is invalid: %w", name, err)
 		}
 	}
 	return nil

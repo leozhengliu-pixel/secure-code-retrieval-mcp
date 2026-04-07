@@ -38,8 +38,8 @@ type SearchFilters struct {
 
 type SearchRequest struct {
 	RequestID       string        `json:"request_id"`
-	TenantID        string        `json:"tenant_id"`
 	CallerPrincipal string        `json:"caller_principal"`
+	CallerRoles     []string      `json:"-"`
 	SourceType      SourceType    `json:"source_type"`
 	SourceHost      string        `json:"source_host"`
 	QueryText       string        `json:"query_text"`
@@ -77,12 +77,19 @@ const (
 )
 
 type PolicyDecision struct {
-	Decision      DecisionAction `json:"decision"`
-	MatchedRules  []string       `json:"matched_rules,omitempty"`
-	Transforms    []string       `json:"transforms,omitempty"`
-	ExportAllowed bool           `json:"export_allowed"`
-	ModelAllowed  bool           `json:"model_allowed"`
-	Reason        string         `json:"reason,omitempty"`
+	Decision      DecisionAction    `json:"decision"`
+	MatchedRules  []string          `json:"matched_rules,omitempty"`
+	Transforms    []string          `json:"transforms,omitempty"`
+	Replacements  []ReplacementRule `json:"-"`
+	ExportAllowed bool              `json:"export_allowed"`
+	ModelAllowed  bool              `json:"model_allowed"`
+	Reason        string            `json:"reason,omitempty"`
+}
+
+type ReplacementRule struct {
+	Literal     string
+	Pattern     string
+	Replacement string
 }
 
 type SanitizedResult struct {
@@ -107,8 +114,8 @@ type SearchResponse struct {
 
 type AuditRequestRecord struct {
 	RequestID       string        `json:"request_id"`
-	TenantID        string        `json:"tenant_id"`
 	CallerPrincipal string        `json:"caller_principal"`
+	CallerRoles     []string      `json:"caller_roles,omitempty"`
 	SourceType      SourceType    `json:"source_type"`
 	SourceHost      string        `json:"source_host"`
 	QueryText       string        `json:"query_text"`

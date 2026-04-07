@@ -68,7 +68,7 @@ func (s *Service) Sanitize(ctx context.Context, req domain.SearchRequest, result
 		return sanitized, false, nil
 	}
 
-	bounded := applyDeterministicMask(result.SnippetTextRaw)
+	bounded := applyDeterministicMask(result.SnippetTextRaw, decision.Replacements)
 	actions := []string{"deterministic_mask"}
 	modelInvoked := false
 
@@ -110,12 +110,28 @@ func (s *Service) Sanitize(ctx context.Context, req domain.SearchRequest, result
 	return sanitized, modelInvoked, nil
 }
 
-func applyDeterministicMask(snippet string) string {
+func applyDeterministicMask(snippet string, replacements []domain.ReplacementRule) string {
 	maskers := []*regexp.Regexp{
 		regexp.MustCompile(`(?i)(api[_-]?key|token|secret)\s*[:=]\s*["'][^"']+["']`),
 		regexp.MustCompile(`AKIA[0-9A-Z]{16}`),
+		regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`),
 	}
 	out := snippet
+	for _, rule := range replacements {
+		replacement := rule.Replacement
+		if replacement == "" {
+			replacement = "[REDACTED]"
+		}
+		if rule.Literal != "" {
+			out = strings.ReplaceAll(out, rule.Literal, replacement)
+		}
+		if rule.Pattern != "" {
+			re, err := regexp.Compile(rule.Pattern)
+			if err == nil {
+				out = re.ReplaceAllString(out, replacement)
+			}
+		}
+	}
 	for _, re := range maskers {
 		out = re.ReplaceAllString(out, "[REDACTED]")
 	}
@@ -123,8 +139,16 @@ func applyDeterministicMask(snippet string) string {
 }
 
 func validateOutput(snippet string) bool {
-	for _, forbidden := range []string{"AKIA", "BEGIN PRIVATE KEY"} {
+	for _, forbidden := range []string{"AKIA", "BEGIN PRIVATE KEY", "ghp_", "glpat-"} {
 		if strings.Contains(snippet, forbidden) {
+			return false
+		}
+	}
+	for _, re := range []*regexp.Regexp{
+		regexp.MustCompile(`(?i)(api[_-]?key|token|secret)\s*[:=]\s*["'][^"']+["']`),
+		regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`),
+	} {
+		if re.MatchString(snippet) {
 			return false
 		}
 	}

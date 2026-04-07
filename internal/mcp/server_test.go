@@ -14,7 +14,7 @@ import (
 )
 
 func TestToolsCallReturnsStructuredContent(t *testing.T) {
-	input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"code_search_secure","arguments":{"tenant_id":"tenant-1","caller_principal":"alice","source_type":"github","source_host":"github.example.com","query_text":"hello","max_results":1,"response_mode":"snippet"}}}`
+	input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"code_search_secure","arguments":{"policy_profile":"default","source_type":"github","source_host":"github.example.com","query_text":"hello","max_results":1,"response_mode":"snippet"}}}`
 	framed := []byte(fmt.Sprintf("Content-Length: %d\r\n\r\n%s", len(input), input))
 	in := bytes.NewBuffer(framed)
 	out := bytes.NewBuffer(nil)
@@ -28,15 +28,45 @@ func TestToolsCallReturnsStructuredContent(t *testing.T) {
 			Sanitizer: fakeSanitizer{},
 			Auditor:   fakeAuditor{},
 		}),
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		in:     in,
-		out:    out,
+		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		defaultUser: "mcp_stdio",
+		in:          in,
+		out:         out,
 	}
 	if err := server.Serve(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(out.Bytes(), []byte(`"structuredContent"`)) {
 		t.Fatalf("expected structured content response, got %s", out.String())
+	}
+}
+
+func TestToolsCallRejectsLegacyTenantField(t *testing.T) {
+	input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"code_search_secure","arguments":{"tenant_id":"legacy","policy_profile":"default","source_type":"github","source_host":"github.example.com","query_text":"hello","max_results":1,"response_mode":"snippet"}}}`
+	framed := []byte(fmt.Sprintf("Content-Length: %d\r\n\r\n%s", len(input), input))
+	in := bytes.NewBuffer(framed)
+	out := bytes.NewBuffer(nil)
+	server := &Server{
+		service: gateway.NewService(gateway.Dependencies{
+			Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+			Timeout:              time.Second,
+			DefaultPolicyProfile: "default",
+			GitHub:               fakeConnector{},
+			GitLab:               fakeConnector{},
+			Policy:               fakePolicy{},
+			Sanitizer:            fakeSanitizer{},
+			Auditor:              fakeAuditor{},
+		}),
+		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		defaultUser: "mcp_stdio",
+		in:          in,
+		out:         out,
+	}
+	if err := server.Serve(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte(`"invalid tool arguments"`)) {
+		t.Fatalf("expected legacy field rejection, got %s", out.String())
 	}
 }
 

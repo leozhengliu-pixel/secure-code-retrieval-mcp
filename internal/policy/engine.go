@@ -22,7 +22,6 @@ type compiledRule struct {
 
 type profile struct {
 	name            string
-	tenantID        string
 	repositoryAllow []string
 	repositoryDeny  []string
 	pathAllow       []string
@@ -39,7 +38,6 @@ func NewEngine(policies []config.PolicyProfile) (*Engine, error) {
 	for _, policy := range policies {
 		cp := profile{
 			name:            policy.Name,
-			tenantID:        policy.TenantID,
 			repositoryAllow: policy.RepositoryAllow,
 			repositoryDeny:  policy.RepositoryDeny,
 			pathAllow:       policy.PathAllow,
@@ -71,10 +69,7 @@ func NewEngine(policies []config.PolicyProfile) (*Engine, error) {
 func (e *Engine) Evaluate(_ context.Context, req domain.SearchRequest, result domain.SearchResult) (domain.PolicyDecision, error) {
 	profile, ok := e.profiles[req.PolicyProfile]
 	if req.PolicyProfile == "" || !ok {
-		return domain.PolicyDecision{Decision: domain.DecisionAllow, ExportAllowed: true, ModelAllowed: false}, nil
-	}
-	if profile.tenantID != "" && profile.tenantID != req.TenantID {
-		return domain.PolicyDecision{}, fmt.Errorf("policy profile tenant mismatch")
+		return domain.PolicyDecision{}, fmt.Errorf("policy profile %q not found", req.PolicyProfile)
 	}
 	if !allowedByScope(profile.repositoryAllow, profile.repositoryDeny, result.Repository) {
 		return suppressDecision("repository restricted", "repository_scope"), nil
@@ -92,6 +87,13 @@ func (e *Engine) Evaluate(_ context.Context, req domain.SearchRequest, result do
 		decision.Transforms = append(decision.Transforms, string(rule.action))
 		decision.ExportAllowed = rule.exportAllowed
 		decision.ModelAllowed = decision.ModelAllowed || rule.modelAllowed
+		if rule.action == domain.DecisionMask || rule.action == domain.DecisionRewriteRequired {
+			decision.Replacements = append(decision.Replacements, domain.ReplacementRule{
+				Literal:     rule.literal,
+				Pattern:     compiledPattern(rule.pattern),
+				Replacement: rule.replacement,
+			})
+		}
 		switch rule.action {
 		case domain.DecisionSuppress:
 			return suppressDecision("content suppressed", rule.name), nil
@@ -106,6 +108,13 @@ func (e *Engine) Evaluate(_ context.Context, req domain.SearchRequest, result do
 		}
 	}
 	return decision, nil
+}
+
+func compiledPattern(re *regexp.Regexp) string {
+	if re == nil {
+		return ""
+	}
+	return re.String()
 }
 
 func matches(rule compiledRule, snippet string) bool {

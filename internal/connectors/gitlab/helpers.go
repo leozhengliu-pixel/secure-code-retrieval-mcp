@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"path/filepath"
 	"strings"
 
@@ -39,5 +40,34 @@ func languageFromPath(p string) string {
 		return "Java"
 	default:
 		return strings.ToUpper(ext)
+	}
+}
+
+func gitlabSourceURL(baseURL string, projectID int, ref, filePath string) string {
+	if baseURL == "" || filePath == "" {
+		return ""
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+	if ref == "" {
+		ref = "HEAD"
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.Path = gitlabWebBasePath(u.Path) + fmt.Sprintf("/-/project/%d/blob/%s/%s", projectID, url.PathEscape(ref), strings.TrimPrefix(filePath, "/"))
+	return u.String()
+}
+
+func gitlabWebBasePath(apiPath string) string {
+	trimmed := strings.TrimSuffix(strings.TrimSpace(apiPath), "/")
+	switch {
+	case trimmed == "/api/v4":
+		return ""
+	case strings.HasSuffix(trimmed, "/api/v4"):
+		return strings.TrimSuffix(trimmed, "/api/v4")
+	default:
+		return trimmed
 	}
 }

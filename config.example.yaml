@@ -11,6 +11,14 @@ network:
     password_env: PROXY_PASSWORD
 database:
   dsn: postgres://postgres:postgres@localhost:5432/secure_code_retrieval?sslmode=disable
+auth:
+  issuer: https://auth.example.com
+  audience: secure-code-retrieval-mcp
+  public_key_env: JWT_PUBLIC_KEY_PEM
+  admin_role: scrm_admin
+  mcp_principal: mcp_stdio
+  mcp_roles: []
+default_policy_profile: default
 connectors:
   github:
     enabled: true
@@ -24,7 +32,6 @@ connectors:
       enabled: false
 policies:
   - name: default
-    tenant_id: tenant-1
     repository_allow:
       - acme/
     path_deny:

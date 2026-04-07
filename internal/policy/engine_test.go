@@ -9,11 +9,11 @@ import (
 )
 
 func TestSuppressesDeniedContent(t *testing.T) {
-	engine, err := NewEngine([]config.PolicyProfile{{Name: "default", TenantID: "tenant-1", Rules: []config.PolicyRule{{Name: "secret", Action: "suppress", Literal: "SECRET", ExportAllowed: false}}}})
+	engine, err := NewEngine([]config.PolicyProfile{{Name: "default", Rules: []config.PolicyRule{{Name: "secret", Action: "suppress", Literal: "SECRET", ExportAllowed: false}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	decision, err := engine.Evaluate(context.Background(), domain.SearchRequest{TenantID: "tenant-1", PolicyProfile: "default"}, domain.SearchResult{Repository: "repo", FilePath: "main.go", SnippetTextRaw: `const key = "SECRET"`})
+	decision, err := engine.Evaluate(context.Background(), domain.SearchRequest{PolicyProfile: "default"}, domain.SearchResult{Repository: "repo", FilePath: "main.go", SnippetTextRaw: `const key = "SECRET"`})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"log/slog"
-	"sync"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
@@ -14,10 +13,8 @@ import (
 )
 
 type AuditRepository struct {
-	db          *sql.DB
-	logger      *slog.Logger
-	schemaOnce  sync.Once
-	schemaError error
+	db     *sql.DB
+	logger *slog.Logger
 }
 
 func NewAuditRepository(cfg config.DatabaseConfig, logger *slog.Logger) (*AuditRepository, error) {
@@ -28,50 +25,18 @@ func NewAuditRepository(cfg config.DatabaseConfig, logger *slog.Logger) (*AuditR
 	return &AuditRepository{db: db, logger: logger}, nil
 }
 
-func (r *AuditRepository) EnsureSchema(ctx context.Context) error {
-	r.schemaOnce.Do(func() {
-		_, r.schemaError = r.db.ExecContext(ctx, `
-CREATE TABLE IF NOT EXISTS audit_requests (
-  audit_id TEXT PRIMARY KEY,
-  request_id TEXT NOT NULL UNIQUE,
-  tenant_id TEXT NOT NULL,
-  caller_principal TEXT NOT NULL,
-  source_type TEXT NOT NULL,
-  source_host TEXT NOT NULL,
-  query_text TEXT NOT NULL,
-  filters_json JSONB NOT NULL,
-  policy_profile TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL
-);
-CREATE TABLE IF NOT EXISTS audit_decisions (
-  id BIGSERIAL PRIMARY KEY,
-  request_id TEXT NOT NULL,
-  audit_id TEXT NOT NULL,
-  repository TEXT NOT NULL,
-  file_path TEXT NOT NULL,
-  decision TEXT NOT NULL,
-  matched_rules JSONB NOT NULL,
-  model_invoked BOOLEAN NOT NULL,
-  release_mode TEXT NOT NULL,
-  suppression_reason TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL
-);
-CREATE TABLE IF NOT EXISTS audit_deliveries (
-  audit_id TEXT PRIMARY KEY,
-  request_id TEXT NOT NULL,
-  snippet_count INT NOT NULL,
-  response_bytes INT NOT NULL,
-  connector_stats JSONB NOT NULL,
-  latency_millis BIGINT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL
-);`)
-	})
-	return r.schemaError
+func (r *AuditRepository) DB() *sql.DB {
+	return r.db
+}
+
+func (r *AuditRepository) Ping(ctx context.Context) error {
+	return r.db.PingContext(ctx)
 }
 
 func (r *AuditRepository) CreateRequest(ctx context.Context, auditID string, record domain.AuditRequestRecord) error {
 	filtersJSON, _ := json.Marshal(record.Filters)
-	_, err := r.db.ExecContext(ctx, `INSERT INTO audit_requests (audit_id, request_id, tenant_id, caller_principal, source_type, source_host, query_text, filters_json, policy_profile, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, auditID, record.RequestID, record.TenantID, record.CallerPrincipal, record.SourceType, record.SourceHost, record.QueryText, filtersJSON, record.PolicyProfile, record.CreatedAt)
+	rolesJSON, _ := json.Marshal(record.CallerRoles)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO audit_requests (audit_id, request_id, caller_principal, caller_roles_json, source_type, source_host, query_text, filters_json, policy_profile, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, auditID, record.RequestID, record.CallerPrincipal, rolesJSON, record.SourceType, record.SourceHost, record.QueryText, filtersJSON, record.PolicyProfile, record.CreatedAt)
 	return err
 }
 
@@ -91,13 +56,15 @@ func (r *AuditRepository) GetBundle(ctx context.Context, requestID string) (doma
 	var bundle domain.AuditBundle
 	var sourceType string
 	var filtersJSON []byte
+	var rolesJSON []byte
 	var auditID string
-	row := r.db.QueryRowContext(ctx, `SELECT request_id, tenant_id, caller_principal, source_type, source_host, query_text, filters_json, policy_profile, created_at, audit_id FROM audit_requests WHERE request_id = $1`, requestID)
-	if err := row.Scan(&bundle.Request.RequestID, &bundle.Request.TenantID, &bundle.Request.CallerPrincipal, &sourceType, &bundle.Request.SourceHost, &bundle.Request.QueryText, &filtersJSON, &bundle.Request.PolicyProfile, &bundle.Request.CreatedAt, &auditID); err != nil {
+	row := r.db.QueryRowContext(ctx, `SELECT request_id, caller_principal, caller_roles_json, source_type, source_host, query_text, filters_json, policy_profile, created_at, audit_id FROM audit_requests WHERE request_id = $1`, requestID)
+	if err := row.Scan(&bundle.Request.RequestID, &bundle.Request.CallerPrincipal, &rolesJSON, &sourceType, &bundle.Request.SourceHost, &bundle.Request.QueryText, &filtersJSON, &bundle.Request.PolicyProfile, &bundle.Request.CreatedAt, &auditID); err != nil {
 		return domain.AuditBundle{}, err
 	}
 	bundle.Request.SourceType = domain.SourceType(sourceType)
 	_ = json.Unmarshal(filtersJSON, &bundle.Request.Filters)
+	_ = json.Unmarshal(rolesJSON, &bundle.Request.CallerRoles)
 
 	rows, err := r.db.QueryContext(ctx, `SELECT request_id, audit_id, repository, file_path, decision, matched_rules, model_invoked, release_mode, suppression_reason, created_at FROM audit_decisions WHERE request_id = $1 ORDER BY id ASC`, requestID)
 	if err != nil {

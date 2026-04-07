@@ -34,6 +34,17 @@ func TestSearchNormalizesResults(t *testing.T) {
 	if results[0].Repository != "42" {
 		t.Fatalf("unexpected repository: %s", results[0].Repository)
 	}
+	if results[0].SourceURL != server.URL+"/-/project/42/blob/main/app/main.go" {
+		t.Fatalf("unexpected source url: %s", results[0].SourceURL)
+	}
+}
+
+func TestGitlabSourceURLStripsAPIPrefix(t *testing.T) {
+	got := gitlabSourceURL("https://gitlab.example.com/api/v4", 42, "main", "app/main.go")
+	want := "https://gitlab.example.com/-/project/42/blob/main/app/main.go"
+	if got != want {
+		t.Fatalf("expected %s, got %s", want, got)
+	}
 }
 
 func TestSearchUsesProxy(t *testing.T) {

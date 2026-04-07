@@ -73,6 +73,9 @@ func (c *Client) Search(ctx context.Context, req domain.SearchRequest) ([]domain
 	if perPage <= 0 {
 		perPage = req.MaxResults
 	}
+	if perPage > 100 {
+		perPage = 100
+	}
 	q.Set("per_page", strconv.Itoa(perPage))
 	if req.Filters.Page > 0 {
 		q.Set("page", strconv.Itoa(req.Filters.Page))
@@ -95,6 +98,15 @@ func (c *Client) Search(ctx context.Context, req domain.SearchRequest) ([]domain
 		return nil, classifyTransportError(err, c.usesProxy != nil && c.usesProxy(httpReq))
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		resp.Body.Close()
+		time.Sleep(100 * time.Millisecond)
+		resp, err = c.client.Do(httpReq.Clone(ctx))
+		if err != nil {
+			return nil, classifyTransportError(err, c.usesProxy != nil && c.usesProxy(httpReq))
+		}
+		defer resp.Body.Close()
+	}
 	if resp.StatusCode == http.StatusProxyAuthRequired {
 		return nil, fmt.Errorf("%w: gitlab proxy auth failed", domain.ErrProxyAuth)
 	}
@@ -135,6 +147,7 @@ func (c *Client) Search(ctx context.Context, req domain.SearchRequest) ([]domain
 			Language:          languageFromPath(filePath),
 			SnippetTextRaw:    item.Data,
 			MatchRanges:       []domain.MatchRange{{StartLine: item.StartLine, EndLine: item.StartLine}},
+			SourceURL:         gitlabSourceURL(c.cfg.BaseURL, item.ProjectID, item.Ref, filePath),
 			ConnectorMetadata: map[string]string{"backend": "gitlab_api"},
 		})
 	}

@@ -9,7 +9,6 @@ import (
 )
 
 type Repository interface {
-	EnsureSchema(ctx context.Context) error
 	CreateRequest(ctx context.Context, auditID string, record domain.AuditRequestRecord) error
 	CreateDecision(ctx context.Context, record domain.AuditDecisionRecord) error
 	CreateDelivery(ctx context.Context, record domain.AuditDeliveryRecord) error
@@ -21,9 +20,6 @@ type Service struct{ repository Repository }
 func NewService(repository Repository) *Service { return &Service{repository: repository} }
 
 func (s *Service) RecordRequest(ctx context.Context, record domain.AuditRequestRecord) (string, error) {
-	if err := s.repository.EnsureSchema(ctx); err != nil {
-		return "", err
-	}
 	auditID := fmt.Sprintf("audit_%d", time.Now().UnixNano())
 	if err := s.repository.CreateRequest(ctx, auditID, record); err != nil {
 		return "", err

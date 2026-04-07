@@ -65,6 +65,9 @@ func (c *Client) Search(ctx context.Context, req domain.SearchRequest) ([]domain
 	if perPage <= 0 {
 		perPage = req.MaxResults
 	}
+	if perPage > 100 {
+		perPage = 100
+	}
 	q.Set("per_page", fmt.Sprintf("%d", perPage))
 	if req.Filters.Page > 0 {
 		q.Set("page", fmt.Sprintf("%d", req.Filters.Page))
@@ -88,6 +91,15 @@ func (c *Client) Search(ctx context.Context, req domain.SearchRequest) ([]domain
 		return nil, classifyTransportError(err, c.usesProxy != nil && c.usesProxy(httpReq))
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		resp.Body.Close()
+		time.Sleep(100 * time.Millisecond)
+		resp, err = c.client.Do(httpReq.Clone(ctx))
+		if err != nil {
+			return nil, classifyTransportError(err, c.usesProxy != nil && c.usesProxy(httpReq))
+		}
+		defer resp.Body.Close()
+	}
 	if resp.StatusCode == http.StatusProxyAuthRequired {
 		return nil, fmt.Errorf("%w: github proxy auth failed", domain.ErrProxyAuth)
 	}
