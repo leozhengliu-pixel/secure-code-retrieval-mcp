@@ -10,7 +10,10 @@ network:
     username_env: PROXY_USERNAME
     password_env: PROXY_PASSWORD
 database:
-  dsn: postgres://postgres:postgres@localhost:5432/secure_code_retrieval?sslmode=disable
+  # Leave dsn empty to use local SQLite by default.
+  sqlite_path: ./var/secure-code-retrieval.db
+  # Configure dsn to use PostgreSQL instead of SQLite.
+  # dsn: postgres://postgres:postgres@localhost:5432/secure_code_retrieval?sslmode=disable
 auth:
   issuer: https://auth.example.com
   audience: secure-code-retrieval-mcp

@@ -13,16 +13,16 @@ This repository now contains a runnable Go implementation of the MVP gateway des
   - `GET /v1/audit/{request_id}`
 - Uses GitHub and GitLab native search APIs as retrieval backends
 - Applies policy-scoped deterministic policy evaluation and bounded sanitization
-- Persists audit request / decision / delivery records in PostgreSQL
+- Persists audit request / decision / delivery records in local SQLite by default, or PostgreSQL when `database.dsn` is configured
 - Supports enterprise outbound proxy configuration with global defaults and per-connector / per-model overrides
 - Requires Bearer JWT for HTTP search and audit APIs
 - Exposes Prometheus metrics on `GET /metrics`
 
 ## Run
 
-1. Start PostgreSQL and create a database.
-2. Copy `config.example.yaml` and set `SCRM_CONFIG`.
-3. Export connector, model, JWT, and optional proxy secrets referenced by `token_env`, `api_key_env`, `public_key_env`, `username_env`, and `password_env`.
+1. Copy `config.example.yaml` and set `SCRM_CONFIG`.
+2. Export connector, model, JWT, and optional proxy secrets referenced by `token_env`, `api_key_env`, `public_key_env`, `username_env`, and `password_env`.
+3. If you want PostgreSQL, set `database.dsn`. If you leave it unset, the service uses local SQLite at `database.sqlite_path`.
 4. Apply schema migrations with `go run ./cmd/migrate`.
 5. Run `go run ./cmd/server`.
 

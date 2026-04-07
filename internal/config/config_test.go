@@ -11,7 +11,7 @@ func TestValidateProxyConfigRejectsInvalidURL(t *testing.T) {
 	for _, rawURL := range []string{"://bad", "proxy.internal:8080", "foo", "socks5://proxy.internal:1080"} {
 		cfg := Config{
 			Runtime:  RuntimeConfig{HTTPAddress: ":8080", RequestTimeout: 1},
-			Database: DatabaseConfig{DSN: "postgres://example"},
+			Database: DatabaseConfig{SQLitePath: "var/test.db"},
 			Auth:     AuthConfig{Issuer: "issuer", Audience: "aud", PublicKeyPEM: "pem"},
 			Connectors: ConnectorsConfig{
 				GitHub: ConnectorConfig{
@@ -32,7 +32,7 @@ func TestValidateProxyConfigRejectsMissingCredentialEnv(t *testing.T) {
 	enabled := true
 	cfg := Config{
 		Runtime:  RuntimeConfig{HTTPAddress: ":8080", RequestTimeout: 1},
-		Database: DatabaseConfig{DSN: "postgres://example"},
+		Database: DatabaseConfig{SQLitePath: "var/test.db"},
 		Auth:     AuthConfig{Issuer: "issuer", Audience: "aud", PublicKeyPEM: "pem"},
 		Network: NetworkConfig{
 			Proxy: &ProxyConfig{
@@ -58,7 +58,7 @@ runtime:
   http_address: ":8080"
   request_timeout: 8s
 database:
-  dsn: postgres://postgres:postgres@localhost:5432/secure_code_retrieval?sslmode=disable
+  sqlite_path: ./var/test.db
 auth:
   issuer: issuer
   audience: aud
@@ -104,7 +104,7 @@ runtime:
   http_address: ":8080"
   request_timeout: 8s
 database:
-  dsn: postgres://postgres:postgres@localhost:5432/secure_code_retrieval?sslmode=disable
+  sqlite_path: ./var/test.db
 auth:
   issuer: issuer
   audience: aud
@@ -134,4 +134,44 @@ default_policy_profile: default
 		return
 	}
 	t.Fatalf("expected defaults to apply before validation, got %v", err)
+}
+
+func TestApplyDefaultsUsesSQLiteWhenDSNMissing(t *testing.T) {
+	cfg := Config{}
+	cfg.applyDefaults()
+	if cfg.Database.DSN != "" {
+		t.Fatalf("expected empty dsn, got %q", cfg.Database.DSN)
+	}
+	if !filepath.IsAbs(cfg.Database.SQLitePath) {
+		t.Fatalf("expected absolute sqlite path, got %q", cfg.Database.SQLitePath)
+	}
+}
+
+func TestLoadResolvesRelativeSQLitePathAgainstConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := `
+runtime:
+  http_address: ":8080"
+  request_timeout: 8s
+database:
+  sqlite_path: ./var/test.db
+auth:
+  issuer: issuer
+  audience: aud
+  public_key_pem: |
+    pem
+`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SCRM_CONFIG", path)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := filepath.Join(dir, "var", "test.db")
+	if cfg.Database.SQLitePath != expected {
+		t.Fatalf("expected sqlite path %q, got %q", expected, cfg.Database.SQLitePath)
+	}
 }

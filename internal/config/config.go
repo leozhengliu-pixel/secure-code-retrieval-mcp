@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -31,7 +32,8 @@ type RuntimeConfig struct {
 }
 
 type DatabaseConfig struct {
-	DSN string `yaml:"dsn"`
+	DSN        string `yaml:"dsn"`
+	SQLitePath string `yaml:"sqlite_path"`
 }
 
 type AuthConfig struct {
@@ -119,6 +121,7 @@ func Load() (Config, error) {
 	if path == "" {
 		cfg := defaultConfig()
 		cfg.applyDefaults()
+		cfg.normalizePaths("")
 		return cfg, cfg.Validate()
 	}
 	data, err := os.ReadFile(path)
@@ -130,6 +133,7 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.applyDefaults()
+	cfg.normalizePaths(path)
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -144,7 +148,7 @@ func defaultConfig() Config {
 			RequestTimeout: 8 * time.Second,
 		},
 		Database: DatabaseConfig{
-			DSN: "postgres://postgres:postgres@localhost:5432/secure_code_retrieval?sslmode=disable",
+			SQLitePath: defaultSQLitePath(),
 		},
 	}
 }
@@ -156,8 +160,8 @@ func (c Config) Validate() error {
 	if c.Runtime.RequestTimeout <= 0 {
 		return errors.New("runtime.request_timeout must be greater than zero")
 	}
-	if c.Database.DSN == "" {
-		return errors.New("database.dsn is required")
+	if c.Database.DSN == "" && c.Database.SQLitePath == "" {
+		return errors.New("database.sqlite_path is required when database.dsn is empty")
 	}
 	if c.Auth.Issuer == "" {
 		return errors.New("auth.issuer is required")
@@ -220,12 +224,38 @@ func (c Config) Validate() error {
 }
 
 func (c *Config) applyDefaults() {
+	if c.Database.DSN == "" && c.Database.SQLitePath == "" {
+		c.Database.SQLitePath = defaultSQLitePath()
+	}
 	if c.Auth.AdminRole == "" {
 		c.Auth.AdminRole = "scrm_admin"
 	}
 	if c.Auth.MCPPrincipal == "" {
 		c.Auth.MCPPrincipal = "mcp_stdio"
 	}
+}
+
+func (c *Config) normalizePaths(configPath string) {
+	if c.Database.DSN != "" || c.Database.SQLitePath == "" || filepath.IsAbs(c.Database.SQLitePath) {
+		return
+	}
+	if configPath != "" {
+		c.Database.SQLitePath = filepath.Clean(filepath.Join(filepath.Dir(configPath), c.Database.SQLitePath))
+		return
+	}
+	c.Database.SQLitePath = filepath.Clean(c.Database.SQLitePath)
+}
+
+func defaultSQLitePath() string {
+	baseDir, err := os.UserConfigDir()
+	if err != nil || baseDir == "" {
+		home, homeErr := os.UserHomeDir()
+		if homeErr != nil || home == "" {
+			return filepath.Clean("var/secure-code-retrieval.db")
+		}
+		baseDir = filepath.Join(home, ".config")
+	}
+	return filepath.Join(baseDir, "secure-code-retrieval-mcp", "secure-code-retrieval.db")
 }
 
 func validatePolicyRule(name string, rule PolicyRule) error {

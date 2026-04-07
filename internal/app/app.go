@@ -18,6 +18,7 @@ import (
 	"secure-code-retrieval-mcp/internal/policy"
 	"secure-code-retrieval-mcp/internal/sanitize"
 	postgresstore "secure-code-retrieval-mcp/internal/storage/postgres"
+	sqlitestore "secure-code-retrieval-mcp/internal/storage/sqlite"
 )
 
 type Application struct {
@@ -26,12 +27,20 @@ type Application struct {
 	mcpServer  *mcp.Server
 }
 
+type auditRepository interface {
+	audit.Repository
+	Ping(context.Context) error
+}
+
+type migrator interface {
+	CheckReady(context.Context) error
+}
+
 func New(cfg config.Config, logger *slog.Logger) (*Application, error) {
-	repository, err := postgresstore.NewAuditRepository(cfg.Database, logger)
+	repository, migratorInstance, err := openAuditStorage(cfg, logger)
 	if err != nil {
 		return nil, err
 	}
-	migrator := postgresstore.NewMigrator(repository.DB())
 	authService, err := auth.New(cfg.Auth)
 	if err != nil {
 		return nil, err
@@ -67,7 +76,7 @@ func New(cfg config.Config, logger *slog.Logger) (*Application, error) {
 	})
 	readiness := newReadinessProbe(metricsRegistry, map[string]readinessCheck{
 		"database":   repository.Ping,
-		"migrations": migrator.CheckReady,
+		"migrations": migratorInstance.CheckReady,
 		"auth":       func(context.Context) error { return nil },
 		"github": func(context.Context) error {
 			if cfg.Connectors.GitHub.Enabled && cfg.Connectors.GitHub.BaseURL == "" {
@@ -89,6 +98,21 @@ func New(cfg config.Config, logger *slog.Logger) (*Application, error) {
 	}
 	mcpServer := mcp.NewServer(svc, logger, cfg.Auth.MCPPrincipal, cfg.Auth.MCPRoles)
 	return &Application{logger: logger, httpServer: httpServer, mcpServer: mcpServer}, nil
+}
+
+func openAuditStorage(cfg config.Config, logger *slog.Logger) (auditRepository, migrator, error) {
+	if cfg.Database.DSN != "" {
+		repository, err := postgresstore.NewAuditRepository(cfg.Database, logger)
+		if err != nil {
+			return nil, nil, err
+		}
+		return repository, postgresstore.NewMigrator(repository.DB()), nil
+	}
+	repository, err := sqlitestore.NewAuditRepository(cfg.Database, logger)
+	if err != nil {
+		return nil, nil, err
+	}
+	return repository, sqlitestore.NewMigrator(repository.DB()), nil
 }
 
 func (a *Application) Run(ctx context.Context) error {
