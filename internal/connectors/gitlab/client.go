@@ -156,3 +156,67 @@ func (c *Client) Search(ctx context.Context, req domain.SearchRequest) ([]domain
 	}
 	return results, nil
 }
+
+func (c *Client) ReadFile(ctx context.Context, req domain.FileReadRequest) (domain.FileContentResult, error) {
+	if !c.cfg.Enabled {
+		return domain.FileContentResult{}, fmt.Errorf("%w: gitlab connector disabled", domain.ErrConnector)
+	}
+	endpoint, err := gitlabFileAPIURL(c.cfg.BaseURL, req.Repository, req.FilePath, req.Ref)
+	if err != nil {
+		return domain.FileContentResult{}, fmt.Errorf("%w: invalid gitlab base url", domain.ErrConnector)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return domain.FileContentResult{}, fmt.Errorf("%w: %v", domain.ErrConnector, err)
+	}
+	if c.token != "" {
+		httpReq.Header.Set("PRIVATE-TOKEN", c.token)
+	}
+	for k, v := range c.cfg.Headers {
+		httpReq.Header.Set(k, v)
+	}
+	resp, err := c.client.Do(httpReq)
+	if err != nil {
+		return domain.FileContentResult{}, classifyTransportError(err, c.usesProxy != nil && c.usesProxy(httpReq))
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return domain.FileContentResult{}, fmt.Errorf("%w: gitlab auth failed", domain.ErrUnauthorized)
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return domain.FileContentResult{}, fmt.Errorf("%w: gitlab rate limited", domain.ErrConnector)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return domain.FileContentResult{}, fmt.Errorf("%w: gitlab file not found", domain.ErrNotFound)
+	}
+	if resp.StatusCode >= 300 {
+		return domain.FileContentResult{}, fmt.Errorf("%w: gitlab upstream status %d", domain.ErrConnector, resp.StatusCode)
+	}
+	var payload struct {
+		FilePath string `json:"file_path"`
+		Content  string `json:"content"`
+		Ref      string `json:"ref"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return domain.FileContentResult{}, fmt.Errorf("%w: decode gitlab response", domain.ErrConnector)
+	}
+	decoded, err := decodeGitLabContent(payload.Content)
+	if err != nil {
+		return domain.FileContentResult{}, err
+	}
+	projectID, err := parseProjectID(req.Repository)
+	if err != nil {
+		return domain.FileContentResult{}, err
+	}
+	return domain.FileContentResult{
+		SourceType:        domain.SourceTypeGitLab,
+		SourceHost:        req.SourceHost,
+		Repository:        req.Repository,
+		FilePath:          payload.FilePath,
+		Ref:               payload.Ref,
+		Language:          languageFromPath(payload.FilePath),
+		FullTextRaw:       decoded,
+		SourceURL:         gitlabSourceURL(c.cfg.BaseURL, projectID, req.Ref, req.FilePath),
+		ConnectorMetadata: map[string]string{"backend": "gitlab_repository_files_api"},
+	}, nil
+}

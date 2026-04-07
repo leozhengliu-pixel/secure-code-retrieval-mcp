@@ -1,12 +1,15 @@
 package gitlab
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"secure-code-retrieval-mcp/internal/domain"
 )
@@ -70,4 +73,49 @@ func gitlabWebBasePath(apiPath string) string {
 	default:
 		return trimmed
 	}
+}
+
+func gitlabFileAPIURL(baseURL, projectID, filePath, ref string) (string, error) {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return "", err
+	}
+	u.Path = strings.TrimSuffix(u.Path, "/") + "/projects/" + url.PathEscape(projectID) + "/repository/files/" + url.PathEscape(strings.TrimPrefix(filePath, "/"))
+	q := u.Query()
+	if ref != "" {
+		q.Set("ref", ref)
+	}
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+func decodeGitLabContent(raw string) (string, error) {
+	bytes, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return "", err
+	}
+	if !isTextContent(bytes) {
+		return "", fmt.Errorf("%w: gitlab content is binary", domain.ErrInvalidRequest)
+	}
+	return string(bytes), nil
+}
+
+func parseProjectID(raw string) (int, error) {
+	id, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, fmt.Errorf("%w: gitlab repository must be numeric project id", domain.ErrInvalidRequest)
+	}
+	return id, nil
+}
+
+func isTextContent(raw []byte) bool {
+	if !utf8.Valid(raw) {
+		return false
+	}
+	for _, b := range raw {
+		if b == 0 {
+			return false
+		}
+	}
+	return true
 }

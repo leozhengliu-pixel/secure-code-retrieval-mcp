@@ -48,12 +48,17 @@ func NewService(factory *ProviderFactory, logger *slog.Logger) *Service {
 
 func (s *Service) Sanitize(ctx context.Context, req domain.SearchRequest, result domain.SearchResult, decision domain.PolicyDecision) (domain.SanitizedResult, bool, error) {
 	sanitized := domain.SanitizedResult{
-		Repository: result.Repository,
-		FilePath:   result.FilePath,
-		Ref:        result.Ref,
-		Language:   result.Language,
-		SourceURL:  result.SourceURL,
-		Metadata:   result.ConnectorMetadata,
+		Repository:     result.Repository,
+		FilePath:       result.FilePath,
+		Ref:            result.Ref,
+		Language:       result.Language,
+		SourceURL:      result.SourceURL,
+		SummaryAllowed: decision.SummaryAllowed,
+		Metadata:       result.ConnectorMetadata,
+	}
+	if len(result.MatchRanges) > 0 {
+		sanitized.LineStart = result.MatchRanges[0].StartLine
+		sanitized.LineEnd = result.MatchRanges[0].EndLine
 	}
 
 	switch decision.Decision {

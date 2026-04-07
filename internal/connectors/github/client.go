@@ -155,6 +155,72 @@ func (c *Client) Search(ctx context.Context, req domain.SearchRequest) ([]domain
 	return results, nil
 }
 
+func (c *Client) ReadFile(ctx context.Context, req domain.FileReadRequest) (domain.FileContentResult, error) {
+	if !c.cfg.Enabled {
+		return domain.FileContentResult{}, fmt.Errorf("%w: github connector disabled", domain.ErrConnector)
+	}
+	endpoint, err := githubFileAPIURL(c.cfg.BaseURL, req.Repository, req.FilePath, req.Ref)
+	if err != nil {
+		return domain.FileContentResult{}, fmt.Errorf("%w: invalid github base url", domain.ErrConnector)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return domain.FileContentResult{}, fmt.Errorf("%w: %v", domain.ErrConnector, err)
+	}
+	httpReq.Header.Set("Accept", "application/vnd.github+json")
+	if c.token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	for k, v := range c.cfg.Headers {
+		httpReq.Header.Set(k, v)
+	}
+	resp, err := c.client.Do(httpReq)
+	if err != nil {
+		return domain.FileContentResult{}, classifyTransportError(err, c.usesProxy != nil && c.usesProxy(httpReq))
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return domain.FileContentResult{}, fmt.Errorf("%w: github auth failed", domain.ErrUnauthorized)
+	}
+	if resp.StatusCode == http.StatusTooManyRequests || resp.Header.Get("X-RateLimit-Remaining") == "0" {
+		return domain.FileContentResult{}, fmt.Errorf("%w: github rate limited", domain.ErrConnector)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return domain.FileContentResult{}, fmt.Errorf("%w: github file not found", domain.ErrNotFound)
+	}
+	if resp.StatusCode >= 300 {
+		return domain.FileContentResult{}, fmt.Errorf("%w: github upstream status %d", domain.ErrConnector, resp.StatusCode)
+	}
+	var payload struct {
+		Type     string `json:"type"`
+		Path     string `json:"path"`
+		HTMLURL  string `json:"html_url"`
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return domain.FileContentResult{}, fmt.Errorf("%w: decode github response", domain.ErrConnector)
+	}
+	if payload.Type != "file" || payload.Encoding != "base64" {
+		return domain.FileContentResult{}, fmt.Errorf("%w: github content is not a text file", domain.ErrInvalidRequest)
+	}
+	decoded, err := decodeGitHubContent(payload.Content)
+	if err != nil {
+		return domain.FileContentResult{}, err
+	}
+	return domain.FileContentResult{
+		SourceType:        domain.SourceTypeGitHub,
+		SourceHost:        req.SourceHost,
+		Repository:        req.Repository,
+		FilePath:          payload.Path,
+		Ref:               req.Ref,
+		Language:          languageFromPath(payload.Path),
+		FullTextRaw:       decoded,
+		SourceURL:         payload.HTMLURL,
+		ConnectorMetadata: map[string]string{"backend": "github_contents_api"},
+	}, nil
+}
+
 func compileQuery(req domain.SearchRequest) string {
 	parts := []string{req.QueryText}
 	for _, repo := range req.Filters.Repositories {

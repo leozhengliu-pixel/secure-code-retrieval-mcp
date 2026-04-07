@@ -15,6 +15,7 @@ import (
 
 type Connector interface {
 	Search(ctx context.Context, req domain.SearchRequest) ([]domain.SearchResult, error)
+	ReadFile(ctx context.Context, req domain.FileReadRequest) (domain.FileContentResult, error)
 }
 
 type PolicyEvaluator interface {
@@ -43,6 +44,7 @@ type Dependencies struct {
 	Policy               PolicyEvaluator
 	Sanitizer            Sanitizer
 	Auditor              Auditor
+	DigestBuilder        DigestBuilder
 }
 
 type Service struct {
@@ -56,9 +58,11 @@ type Service struct {
 	policy               PolicyEvaluator
 	sanitizer            Sanitizer
 	auditor              Auditor
+	digestBuilder        DigestBuilder
 }
 
 type SearchInput = domain.SearchRequest
+type FileReadInput = domain.FileReadRequest
 
 func NewService(deps Dependencies) *Service {
 	return &Service{
@@ -72,6 +76,7 @@ func NewService(deps Dependencies) *Service {
 		policy:               deps.Policy,
 		sanitizer:            deps.Sanitizer,
 		auditor:              deps.Auditor,
+		digestBuilder:        deps.DigestBuilder,
 	}
 }
 
@@ -129,10 +134,14 @@ func (s *Service) Search(ctx context.Context, req SearchInput) (domain.SearchRes
 		s.observeConnectorError(req.SourceType, err)
 		return domain.SearchResponse{}, err
 	}
+	if s.metrics != nil {
+		s.metrics.RawHits.WithLabelValues(string(req.SourceType)).Add(float64(len(results)))
+	}
 
-	sanitized := make([]domain.SanitizedResult, 0, len(results))
+	sanitized := make([]domain.EvidenceItem, 0, len(results))
 	modelCalls := 0
-	for _, result := range results {
+	for idx, rawResult := range results {
+		result := BoundSearchResult(rawResult)
 		decision, err := s.policy.Evaluate(ctx, req, result)
 		if err != nil {
 			status = "policy_error"
@@ -146,6 +155,7 @@ func (s *Service) Search(ctx context.Context, req SearchInput) (domain.SearchRes
 			status = "sanitize_error"
 			return domain.SearchResponse{}, fmt.Errorf("%w: %v", domain.ErrSanitization, err)
 		}
+		item.EvidenceID = fmt.Sprintf("e%d", idx+1)
 		item.AuditID = auditID
 		sanitized = append(sanitized, item)
 		if modelInvoked {
@@ -160,8 +170,11 @@ func (s *Service) Search(ctx context.Context, req SearchInput) (domain.SearchRes
 		if err := s.auditor.RecordDecision(ctx, domain.AuditDecisionRecord{
 			RequestID:         req.RequestID,
 			AuditID:           auditID,
+			EvidenceID:        item.EvidenceID,
 			Repository:        result.Repository,
 			FilePath:          result.FilePath,
+			LineStart:         item.LineStart,
+			LineEnd:           item.LineEnd,
 			Decision:          decision.Decision,
 			MatchedRules:      decision.MatchedRules,
 			ModelInvoked:      modelInvoked,
@@ -174,22 +187,56 @@ func (s *Service) Search(ctx context.Context, req SearchInput) (domain.SearchRes
 		}
 	}
 
-	response := domain.SearchResponse{RequestID: req.RequestID, AuditID: auditID, Results: sanitized}
+	builder := s.digestBuilder
+	if builder == nil {
+		builder = NewDigestBuilder()
+	}
+	finalResults, digest, truncation := builder.Build(req, results, sanitized)
+	if s.metrics != nil {
+		s.metrics.EvidenceItems.WithLabelValues(req.PolicyProfile).Add(float64(len(finalResults)))
+		if digest != nil && digest.SummaryText != "" {
+			s.metrics.SummaryGenerated.WithLabelValues(req.PolicyProfile).Inc()
+		}
+		if truncation != nil && truncation.ResultsTruncated {
+			s.metrics.BudgetTruncated.WithLabelValues(req.PolicyProfile).Inc()
+		}
+	}
+	response := domain.SearchResponse{RequestID: req.RequestID, AuditID: auditID, Results: finalResults, Digest: digest, Truncation: truncation}
 	payload, _ := json.Marshal(response)
+	summaryCitationIDs := make([]string, 0)
+	if digest != nil {
+		for _, citation := range digest.Citations {
+			summaryCitationIDs = append(summaryCitationIDs, citation.CitationID+":"+citation.EvidenceID)
+		}
+	}
+	suppressedCount := 0
+	for _, item := range finalResults {
+		if item.ReleaseMode == "suppressed" {
+			suppressedCount++
+		}
+	}
 	if err := s.auditor.RecordDelivery(ctx, domain.AuditDeliveryRecord{
-		RequestID:      req.RequestID,
-		AuditID:        auditID,
-		SnippetCount:   len(sanitized),
-		ResponseBytes:  len(payload),
-		ConnectorStats: map[string]int{"results": len(results), "model_invocations": modelCalls},
-		LatencyMillis:  time.Since(start).Milliseconds(),
-		CreatedAt:      time.Now().UTC(),
+		RequestID:             req.RequestID,
+		AuditID:               auditID,
+		SnippetCount:          len(finalResults),
+		RawHitCount:           len(results),
+		EvidenceCount:         len(finalResults),
+		SuppressedCount:       suppressedCount,
+		ResponseBytes:         len(payload),
+		ConnectorStats:        map[string]int{"results": len(results), "model_invocations": modelCalls},
+		LatencyMillis:         time.Since(start).Milliseconds(),
+		ResultsTruncated:      truncation != nil && truncation.ResultsTruncated,
+		SuppressedDueToBudget: valueOrZero(truncation, func(t *domain.TruncationInfo) int { return t.SuppressedDueToBudget }),
+		RemainingHitsEstimate: valueOrZero(truncation, func(t *domain.TruncationInfo) int { return t.RemainingHitsEstimate }),
+		SummaryGenerated:      digest != nil && digest.SummaryText != "",
+		SummaryCitationIDs:    summaryCitationIDs,
+		CreatedAt:             time.Now().UTC(),
 	}); err != nil {
 		status = "audit_error"
 		return domain.SearchResponse{}, fmt.Errorf("%w: %v", domain.ErrAuditPersistence, err)
 	}
 
-	s.logger.Info("search completed", "request_id", req.RequestID, "audit_id", auditID, "results", len(sanitized))
+	s.logger.Info("search completed", "request_id", req.RequestID, "audit_id", auditID, "raw_hit_count", len(results), "evidence_count", len(finalResults), "suppressed_count", suppressedCount, "summary_generated", digest != nil && digest.SummaryText != "")
 	return response, nil
 }
 
@@ -209,6 +256,121 @@ func (s *Service) GetAudit(ctx context.Context, requestID string) (domain.AuditB
 	return bundle, nil
 }
 
+func (s *Service) ReadFileWindow(ctx context.Context, req FileReadInput) (domain.FileReadResponse, error) {
+	if req.CallerPrincipal == "" {
+		return domain.FileReadResponse{}, domain.ErrMissingPrincipal
+	}
+	if req.SourceType == "" || req.SourceHost == "" || req.Repository == "" || req.FilePath == "" || req.Ref == "" || req.StartLine < 1 || req.LineCount < 1 || req.LineCount > 80 {
+		return domain.FileReadResponse{}, domain.ErrInvalidRequest
+	}
+	if req.PolicyProfile == "" {
+		req.PolicyProfile = s.defaultPolicyProfile
+	}
+	if req.PolicyProfile == "" {
+		return domain.FileReadResponse{}, domain.ErrInvalidRequest
+	}
+	if req.RequestID == "" {
+		req.RequestID = fmt.Sprintf("req_%d", time.Now().UnixNano())
+	}
+
+	ctx = domain.WithRequestMetadata(ctx, req.RequestID, req.CallerPrincipal, req.CallerRoles)
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+
+	start := time.Now()
+	auditID, err := s.auditor.RecordRequest(ctx, domain.AuditRequestRecord{
+		RequestID:       req.RequestID,
+		CallerPrincipal: req.CallerPrincipal,
+		CallerRoles:     req.CallerRoles,
+		SourceType:      req.SourceType,
+		SourceHost:      req.SourceHost,
+		QueryText:       fmt.Sprintf("read:%s@%s", req.FilePath, req.Ref),
+		PolicyProfile:   req.PolicyProfile,
+		CreatedAt:       time.Now().UTC(),
+	})
+	if err != nil {
+		return domain.FileReadResponse{}, fmt.Errorf("%w: %v", domain.ErrAuditPersistence, err)
+	}
+
+	content, err := s.connectorFor(req.SourceType).ReadFile(ctx, req)
+	if err != nil {
+		s.observeConnectorError(req.SourceType, err)
+		return domain.FileReadResponse{}, err
+	}
+
+	window, truncation, err := buildFileWindow(content, req.StartLine, req.LineCount)
+	if err != nil {
+		return domain.FileReadResponse{}, err
+	}
+	searchReq := domain.SearchRequest{
+		RequestID:       req.RequestID,
+		CallerPrincipal: req.CallerPrincipal,
+		CallerRoles:     req.CallerRoles,
+		SourceType:      req.SourceType,
+		SourceHost:      req.SourceHost,
+		QueryText:       req.FilePath,
+		MaxResults:      1,
+		PolicyProfile:   req.PolicyProfile,
+		ResponseMode:    domain.ResponseModeSnippet,
+	}
+	decision, err := s.policy.Evaluate(ctx, searchReq, window)
+	if err != nil {
+		return domain.FileReadResponse{}, fmt.Errorf("%w: %v", domain.ErrPolicyEvaluation, err)
+	}
+	item, modelInvoked, err := s.sanitizer.Sanitize(ctx, searchReq, window, decision)
+	if err != nil {
+		return domain.FileReadResponse{}, fmt.Errorf("%w: %v", domain.ErrSanitization, err)
+	}
+	item.EvidenceID = "e1"
+	item.AuditID = auditID
+
+	if err := s.auditor.RecordDecision(ctx, domain.AuditDecisionRecord{
+		RequestID:         req.RequestID,
+		AuditID:           auditID,
+		EvidenceID:        item.EvidenceID,
+		Repository:        item.Repository,
+		FilePath:          item.FilePath,
+		LineStart:         item.LineStart,
+		LineEnd:           item.LineEnd,
+		Decision:          decision.Decision,
+		MatchedRules:      decision.MatchedRules,
+		ModelInvoked:      modelInvoked,
+		ReleaseMode:       item.ReleaseMode,
+		SuppressionReason: item.SuppressionReason,
+		CreatedAt:         time.Now().UTC(),
+	}); err != nil {
+		return domain.FileReadResponse{}, fmt.Errorf("%w: %v", domain.ErrAuditPersistence, err)
+	}
+
+	response := domain.FileReadResponse{
+		RequestID:  req.RequestID,
+		AuditID:    auditID,
+		Result:     item,
+		Truncation: truncation,
+	}
+	payload, _ := json.Marshal(response)
+	if err := s.auditor.RecordDelivery(ctx, domain.AuditDeliveryRecord{
+		RequestID:             req.RequestID,
+		AuditID:               auditID,
+		SnippetCount:          1,
+		RawHitCount:           1,
+		EvidenceCount:         1,
+		SuppressedCount:       boolToInt(item.ReleaseMode == "suppressed"),
+		ResponseBytes:         len(payload),
+		ConnectorStats:        map[string]int{"results": 1, "model_invocations": boolToInt(modelInvoked)},
+		LatencyMillis:         time.Since(start).Milliseconds(),
+		ResultsTruncated:      truncation != nil && truncation.ResultsTruncated,
+		SuppressedDueToBudget: valueOrZero(truncation, func(t *domain.TruncationInfo) int { return t.SuppressedDueToBudget }),
+		RemainingHitsEstimate: valueOrZero(truncation, func(t *domain.TruncationInfo) int { return t.RemainingHitsEstimate }),
+		SummaryGenerated:      false,
+		SummaryCitationIDs:    nil,
+		CreatedAt:             time.Now().UTC(),
+	}); err != nil {
+		return domain.FileReadResponse{}, fmt.Errorf("%w: %v", domain.ErrAuditPersistence, err)
+	}
+	return response, nil
+}
+
 func (s *Service) connectorFor(sourceType domain.SourceType) Connector {
 	switch sourceType {
 	case domain.SourceTypeGitHub:
@@ -224,6 +386,10 @@ type unsupportedConnector struct{}
 
 func (unsupportedConnector) Search(context.Context, domain.SearchRequest) ([]domain.SearchResult, error) {
 	return nil, errors.New("unsupported source type")
+}
+
+func (unsupportedConnector) ReadFile(context.Context, domain.FileReadRequest) (domain.FileContentResult, error) {
+	return domain.FileContentResult{}, errors.New("unsupported source type")
 }
 
 func (s *Service) observeConnectorError(sourceType domain.SourceType, err error) {
@@ -253,4 +419,19 @@ func containsRole(roles []string, role string) bool {
 		}
 	}
 	return false
+}
+
+func valueOrZero[T any](v *domain.TruncationInfo, fn func(*domain.TruncationInfo) T) T {
+	var zero T
+	if v == nil {
+		return zero
+	}
+	return fn(v)
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }

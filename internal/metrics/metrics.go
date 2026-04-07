@@ -14,6 +14,10 @@ type Metrics struct {
 	PolicyHits       *prometheus.CounterVec
 	SanitizeSuppress *prometheus.CounterVec
 	ModelInvocations *prometheus.CounterVec
+	RawHits          *prometheus.CounterVec
+	EvidenceItems    *prometheus.CounterVec
+	SummaryGenerated *prometheus.CounterVec
+	BudgetTruncated  *prometheus.CounterVec
 	ProxyUsage       *prometheus.CounterVec
 	ReadyState       *prometheus.GaugeVec
 	registry         *prometheus.Registry
@@ -47,6 +51,22 @@ func New() *Metrics {
 			Name: "scrm_model_invocations_total",
 			Help: "Model rewrite invocations.",
 		}, []string{"policy_profile", "provider"}),
+		RawHits: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "scrm_raw_hits_total",
+			Help: "Raw connector hits returned.",
+		}, []string{"source_type"}),
+		EvidenceItems: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "scrm_evidence_items_total",
+			Help: "Evidence items emitted after sanitization and budget shaping.",
+		}, []string{"policy_profile"}),
+		SummaryGenerated: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "scrm_summary_generated_total",
+			Help: "Summary responses generated.",
+		}, []string{"policy_profile"}),
+		BudgetTruncated: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "scrm_budget_truncated_total",
+			Help: "Responses truncated due to digest budgets.",
+		}, []string{"policy_profile"}),
 		ProxyUsage: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "scrm_proxy_usage_total",
 			Help: "Outbound requests that used a proxy.",
@@ -64,6 +84,10 @@ func New() *Metrics {
 		m.PolicyHits,
 		m.SanitizeSuppress,
 		m.ModelInvocations,
+		m.RawHits,
+		m.EvidenceItems,
+		m.SummaryGenerated,
+		m.BudgetTruncated,
 		m.ProxyUsage,
 		m.ReadyState,
 	)

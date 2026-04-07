@@ -101,6 +101,16 @@ func TestReadyzReturnsStructuredFailure(t *testing.T) {
 	}
 }
 
+func TestFileViewRequiresJWT(t *testing.T) {
+	handler := newTestHTTPHandler(t, testAuditor{})
+	req := httptest.NewRequest(http.MethodPost, "/v1/file-view", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+}
+
 func newTestHTTPHandler(t *testing.T, auditor testAuditor) http.Handler {
 	return newTestHTTPHandlerWithReadiness(t, auditor, map[string]readinessCheck{"database": func(context.Context) error { return nil }})
 }
@@ -130,6 +140,17 @@ type testConnector struct{}
 
 func (testConnector) Search(context.Context, domain.SearchRequest) ([]domain.SearchResult, error) {
 	return []domain.SearchResult{{Repository: "repo", FilePath: "main.go", SnippetTextRaw: "hello"}}, nil
+}
+
+func (testConnector) ReadFile(context.Context, domain.FileReadRequest) (domain.FileContentResult, error) {
+	return domain.FileContentResult{
+		Repository:  "repo",
+		FilePath:    "main.go",
+		Ref:         "main",
+		Language:    "Go",
+		FullTextRaw: "line1\nline2\nline3",
+		SourceURL:   "https://example/repo/blob/main/main.go",
+	}, nil
 }
 
 type testPolicy struct{}

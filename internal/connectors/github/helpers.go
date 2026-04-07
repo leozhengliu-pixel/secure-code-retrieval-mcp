@@ -1,11 +1,14 @@
 package github
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"secure-code-retrieval-mcp/internal/domain"
 )
@@ -40,4 +43,42 @@ func languageFromPath(p string) string {
 	default:
 		return strings.ToUpper(ext)
 	}
+}
+
+func githubFileAPIURL(baseURL, repository, filePath, ref string) (string, error) {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return "", err
+	}
+	u.Path = strings.TrimSuffix(u.Path, "/") + "/repos/" + repository + "/contents/" + strings.TrimPrefix(filePath, "/")
+	q := u.Query()
+	if ref != "" {
+		q.Set("ref", ref)
+	}
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+func decodeGitHubContent(raw string) (string, error) {
+	cleaned := strings.ReplaceAll(raw, "\n", "")
+	bytes, err := base64.StdEncoding.DecodeString(cleaned)
+	if err != nil {
+		return "", err
+	}
+	if !isTextContent(bytes) {
+		return "", fmt.Errorf("%w: github content is binary", domain.ErrInvalidRequest)
+	}
+	return string(bytes), nil
+}
+
+func isTextContent(raw []byte) bool {
+	if !utf8.Valid(raw) {
+		return false
+	}
+	for _, b := range raw {
+		if b == 0 {
+			return false
+		}
+	}
+	return true
 }

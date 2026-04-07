@@ -63,6 +63,7 @@ func New(cfg config.Config, logger *slog.Logger) (*Application, error) {
 		Policy:               policyEngine,
 		Sanitizer:            sanitizer,
 		Auditor:              auditor,
+		DigestBuilder:        gateway.NewDigestBuilder(),
 	})
 	readiness := newReadinessProbe(metricsRegistry, map[string]readinessCheck{
 		"database":   repository.Ping,

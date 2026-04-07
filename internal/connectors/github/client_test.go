@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"encoding/base64"
 	"io"
 	"log/slog"
 	"net/http"
@@ -109,5 +110,27 @@ func TestSearchProxyAuthError(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), domain.ErrProxyAuth.Error()) {
 		t.Fatalf("expected proxy auth error, got %v", err)
+	}
+}
+
+func TestReadFileRejectsBinaryContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"type":"file","path":"bin.dat","html_url":"https://example/repo/blob/main/bin.dat","content":"` + base64.StdEncoding.EncodeToString([]byte{0x00, 0x01, 0x02}) + `","encoding":"base64"}`))
+	}))
+	defer server.Close()
+
+	client, err := New(config.ConnectorConfig{Enabled: true, BaseURL: server.URL}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.ReadFile(context.Background(), domain.FileReadRequest{
+		SourceType: domain.SourceTypeGitHub,
+		SourceHost: "github.example.com",
+		Repository: "acme/repo",
+		FilePath:   "bin.dat",
+		Ref:        "main",
+	})
+	if err == nil || !strings.Contains(err.Error(), domain.ErrInvalidRequest.Error()) {
+		t.Fatalf("expected invalid request, got %v", err)
 	}
 }

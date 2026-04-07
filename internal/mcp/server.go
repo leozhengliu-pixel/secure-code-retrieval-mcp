@@ -78,11 +78,18 @@ func (s *Server) handle(ctx context.Context, req rpcRequest) rpcResponse {
 			JSONRPC: "2.0",
 			ID:      req.ID,
 			Result: map[string]any{
-				"tools": []map[string]any{{
-					"name":        "code_search_secure",
-					"description": "Search enterprise code and return policy-sanitized snippets",
-					"inputSchema": toolInputSchema(),
-				}},
+				"tools": []map[string]any{
+					{
+						"name":        "code_search_secure",
+						"description": "Search enterprise code and return policy-sanitized snippets",
+						"inputSchema": searchToolInputSchema(),
+					},
+					{
+						"name":        "code_view_secure",
+						"description": "Read a policy-sanitized file window from enterprise code",
+						"inputSchema": fileViewToolInputSchema(),
+					},
+				},
 			},
 		}
 	case "tools/call":
@@ -93,35 +100,10 @@ func (s *Server) handle(ctx context.Context, req rpcRequest) rpcResponse {
 		if err := decodeParams(req.Params, &params); err != nil {
 			return rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32602, Message: "invalid params"}}
 		}
-		if params.Name != "code_search_secure" {
+		if params.Name != "code_search_secure" && params.Name != "code_view_secure" {
 			return rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32601, Message: "tool not found"}}
 		}
-		var input gateway.SearchInput
-		decoder := json.NewDecoder(strings.NewReader(string(params.Arguments)))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&input); err != nil {
-			return rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32602, Message: "invalid tool arguments"}}
-		}
-		if input.CallerPrincipal != "" {
-			return rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32602, Message: "caller_principal must not be supplied"}}
-		}
-		input.CallerPrincipal = s.defaultUser
-		input.CallerRoles = append([]string(nil), s.defaultRoles...)
-		ctx = domain.WithRequestMetadata(ctx, input.RequestID, input.CallerPrincipal, input.CallerRoles)
-		resp, err := s.service.Search(ctx, input)
-		if err != nil {
-			code, payload := mapMCPError(err)
-			return rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: code, Message: payload}}
-		}
-		data, _ := json.Marshal(resp)
-		return rpcResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result: map[string]any{
-				"content":           []map[string]string{{"type": "text", "text": string(data)}},
-				"structuredContent": resp,
-			},
-		}
+		return s.handleToolCall(ctx, req.ID, params.Name, params.Arguments)
 	case "ping":
 		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]string{"status": "ok"}}
 	default:
@@ -166,7 +148,7 @@ func readFrame(reader *bufio.Reader) ([]byte, error) {
 	return payload, err
 }
 
-func toolInputSchema() map[string]any {
+func searchToolInputSchema() map[string]any {
 	return map[string]any{
 		"type":     "object",
 		"required": []string{"source_type", "source_host", "query_text", "max_results", "response_mode"},
@@ -179,6 +161,24 @@ func toolInputSchema() map[string]any {
 			"policy_profile": map[string]string{"type": "string"},
 			"response_mode":  map[string]any{"type": "string", "enum": []string{string(domain.ResponseModeSnippet), string(domain.ResponseModeSummary)}},
 			"filters":        map[string]any{"type": "object"},
+		},
+	}
+}
+
+func fileViewToolInputSchema() map[string]any {
+	return map[string]any{
+		"type":     "object",
+		"required": []string{"source_type", "source_host", "repository", "file_path", "ref", "start_line", "line_count"},
+		"properties": map[string]any{
+			"request_id":     map[string]string{"type": "string"},
+			"source_type":    map[string]any{"type": "string", "enum": []string{string(domain.SourceTypeGitHub), string(domain.SourceTypeGitLab)}},
+			"source_host":    map[string]string{"type": "string"},
+			"repository":     map[string]string{"type": "string"},
+			"file_path":      map[string]string{"type": "string"},
+			"ref":            map[string]string{"type": "string"},
+			"start_line":     map[string]string{"type": "integer"},
+			"line_count":     map[string]string{"type": "integer"},
+			"policy_profile": map[string]string{"type": "string"},
 		},
 	}
 }
@@ -222,5 +222,62 @@ func mapMCPError(err error) (int, string) {
 		return -32080, "audit_error"
 	default:
 		return -32000, "internal_error"
+	}
+}
+
+func (s *Server) handleToolCall(ctx context.Context, id any, name string, arguments json.RawMessage) rpcResponse {
+	switch name {
+	case "code_search_secure":
+		var input gateway.SearchInput
+		decoder := json.NewDecoder(strings.NewReader(string(arguments)))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&input); err != nil {
+			return rpcResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: -32602, Message: "invalid tool arguments"}}
+		}
+		if input.CallerPrincipal != "" {
+			return rpcResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: -32602, Message: "caller_principal must not be supplied"}}
+		}
+		input.CallerPrincipal = s.defaultUser
+		input.CallerRoles = append([]string(nil), s.defaultRoles...)
+		ctx = domain.WithRequestMetadata(ctx, input.RequestID, input.CallerPrincipal, input.CallerRoles)
+		resp, err := s.service.Search(ctx, input)
+		if err != nil {
+			code, payload := mapMCPError(err)
+			return rpcResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: code, Message: payload}}
+		}
+		return toolSuccessResponse(id, resp)
+	case "code_view_secure":
+		var input gateway.FileReadInput
+		decoder := json.NewDecoder(strings.NewReader(string(arguments)))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&input); err != nil {
+			return rpcResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: -32602, Message: "invalid tool arguments"}}
+		}
+		if input.CallerPrincipal != "" {
+			return rpcResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: -32602, Message: "caller_principal must not be supplied"}}
+		}
+		input.CallerPrincipal = s.defaultUser
+		input.CallerRoles = append([]string(nil), s.defaultRoles...)
+		ctx = domain.WithRequestMetadata(ctx, input.RequestID, input.CallerPrincipal, input.CallerRoles)
+		resp, err := s.service.ReadFileWindow(ctx, input)
+		if err != nil {
+			code, payload := mapMCPError(err)
+			return rpcResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: code, Message: payload}}
+		}
+		return toolSuccessResponse(id, resp)
+	default:
+		return rpcResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: -32601, Message: "tool not found"}}
+	}
+}
+
+func toolSuccessResponse(id any, payload any) rpcResponse {
+	data, _ := json.Marshal(payload)
+	return rpcResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result: map[string]any{
+			"content":           []map[string]string{{"type": "text", "text": string(data)}},
+			"structuredContent": payload,
+		},
 	}
 }

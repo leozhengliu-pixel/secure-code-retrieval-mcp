@@ -78,7 +78,7 @@ func (e *Engine) Evaluate(_ context.Context, req domain.SearchRequest, result do
 		return suppressDecision("path restricted", "path_scope"), nil
 	}
 
-	decision := domain.PolicyDecision{Decision: domain.DecisionAllow, ExportAllowed: true, ModelAllowed: false}
+	decision := domain.PolicyDecision{Decision: domain.DecisionAllow, ExportAllowed: true, ModelAllowed: false, SummaryAllowed: true}
 	for _, rule := range profile.rules {
 		if !matches(rule, result.SnippetTextRaw) {
 			continue
@@ -86,6 +86,7 @@ func (e *Engine) Evaluate(_ context.Context, req domain.SearchRequest, result do
 		decision.MatchedRules = append(decision.MatchedRules, rule.name)
 		decision.Transforms = append(decision.Transforms, string(rule.action))
 		decision.ExportAllowed = rule.exportAllowed
+		decision.SummaryAllowed = rule.exportAllowed
 		decision.ModelAllowed = decision.ModelAllowed || rule.modelAllowed
 		if rule.action == domain.DecisionMask || rule.action == domain.DecisionRewriteRequired {
 			decision.Replacements = append(decision.Replacements, domain.ReplacementRule{
@@ -153,11 +154,12 @@ func chooseReplacement(v string) string {
 
 func suppressDecision(reason, rule string) domain.PolicyDecision {
 	return domain.PolicyDecision{
-		Decision:      domain.DecisionSuppress,
-		MatchedRules:  []string{rule},
-		Transforms:    []string{string(domain.DecisionSuppress)},
-		ExportAllowed: false,
-		ModelAllowed:  false,
-		Reason:        reason,
+		Decision:       domain.DecisionSuppress,
+		MatchedRules:   []string{rule},
+		Transforms:     []string{string(domain.DecisionSuppress)},
+		ExportAllowed:  false,
+		ModelAllowed:   false,
+		SummaryAllowed: false,
+		Reason:         reason,
 	}
 }

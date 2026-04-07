@@ -82,6 +82,35 @@ func NewHTTPHandler(service *gateway.Service, authn *auth.Service, readiness *re
 		}
 		writeJSON(w, http.StatusOK, resp)
 	})))
+	mux.Handle("/v1/file-view", authenticate(authn, logger, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeAPIError(w, http.StatusMethodNotAllowed, apiError{Code: "invalid_request", Message: "method not allowed", RequestID: domain.RequestIDFromContext(r.Context())})
+			return
+		}
+		var req gateway.FileReadInput
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&req); err != nil {
+			writeAPIError(w, http.StatusBadRequest, apiError{Code: "invalid_request", Message: "invalid json body", RequestID: domain.RequestIDFromContext(r.Context())})
+			return
+		}
+		if req.CallerPrincipal != "" {
+			writeAPIError(w, http.StatusBadRequest, apiError{Code: "invalid_request", Message: "caller_principal must not be supplied", RequestID: domain.RequestIDFromContext(r.Context())})
+			return
+		}
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		req.CallerPrincipal = claims.Subject
+		req.CallerRoles = claims.Roles
+		resp, err := service.ReadFileWindow(r.Context(), req)
+		if err != nil {
+			status, payload := classifyError(err)
+			payload.RequestID = domain.RequestIDFromContext(r.Context())
+			logger.Error("file view request failed", "err", err, "request_id", payload.RequestID)
+			writeAPIError(w, status, payload)
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+	})))
 
 	return mux
 }

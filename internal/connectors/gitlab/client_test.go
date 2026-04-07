@@ -2,6 +2,7 @@ package gitlab
 
 import (
 	"context"
+	"encoding/base64"
 	"io"
 	"log/slog"
 	"net/http"
@@ -116,5 +117,49 @@ func TestSearchProxyAuthError(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), domain.ErrProxyAuth.Error()) {
 		t.Fatalf("expected proxy auth error, got %v", err)
+	}
+}
+
+func TestReadFileRejectsNonNumericProjectID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"file_path":"app/main.go","content":"` + base64.StdEncoding.EncodeToString([]byte("package main")) + `","ref":"main"}`))
+	}))
+	defer server.Close()
+
+	client, err := New(config.ConnectorConfig{Enabled: true, BaseURL: server.URL}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.ReadFile(context.Background(), domain.FileReadRequest{
+		SourceType: domain.SourceTypeGitLab,
+		SourceHost: "gitlab.example.com",
+		Repository: "group/project",
+		FilePath:   "app/main.go",
+		Ref:        "main",
+	})
+	if err == nil || !strings.Contains(err.Error(), domain.ErrInvalidRequest.Error()) {
+		t.Fatalf("expected invalid request, got %v", err)
+	}
+}
+
+func TestReadFileRejectsBinaryContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"file_path":"bin.dat","content":"` + base64.StdEncoding.EncodeToString([]byte{0x00, 0x01, 0x02}) + `","ref":"main"}`))
+	}))
+	defer server.Close()
+
+	client, err := New(config.ConnectorConfig{Enabled: true, BaseURL: server.URL}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.ReadFile(context.Background(), domain.FileReadRequest{
+		SourceType: domain.SourceTypeGitLab,
+		SourceHost: "gitlab.example.com",
+		Repository: "42",
+		FilePath:   "bin.dat",
+		Ref:        "main",
+	})
+	if err == nil || !strings.Contains(err.Error(), domain.ErrInvalidRequest.Error()) {
+		t.Fatalf("expected invalid request, got %v", err)
 	}
 }
