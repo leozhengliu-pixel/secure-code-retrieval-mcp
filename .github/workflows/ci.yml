@@ -1,0 +1,175 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  test-and-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install smoke test dependencies
+        run: sudo apt-get update && sudo apt-get install -y sqlite3
+
+      - name: Run unit tests
+        run: go test ./...
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: secure-code-retrieval-mcp:ci
+
+      - name: Prepare smoke test config
+        id: smoke-config
+        shell: bash
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d)"
+          openssl genrsa -out "$workdir/private.pem" 2048 >/dev/null 2>&1
+          openssl rsa -in "$workdir/private.pem" -pubout -out "$workdir/public.pem" >/dev/null 2>&1
+
+          {
+            cat <<'EOF'
+log_level: info
+runtime:
+  http_address: ":8080"
+  request_timeout: 8s
+database:
+  sqlite_path: /work/secure-code-retrieval.db
+auth:
+  issuer: https://ci.local
+  audience: secure-code-retrieval-mcp
+  public_key_pem: |
+EOF
+            sed 's/^/    /' "$workdir/public.pem"
+            cat <<'EOF'
+  admin_role: scrm_admin
+default_policy_profile: default
+connectors:
+  github:
+    enabled: false
+  gitlab:
+    enabled: false
+policies:
+  - name: default
+    rules:
+      - name: allow-basic
+        action: allow
+models: []
+EOF
+          } >"$workdir/config.yaml"
+
+          sqlite3 "$workdir/secure-code-retrieval.db" < internal/storage/sqlite/migrations/0001_audit.sql
+          sqlite3 "$workdir/secure-code-retrieval.db" "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, '$(date -u +%Y-%m-%dT%H:%M:%SZ)');"
+
+          cat >"$workdir/mint_jwt.go" <<'EOF'
+package main
+
+import (
+  "crypto/rsa"
+  "crypto/x509"
+  "encoding/pem"
+  "fmt"
+  "os"
+  "time"
+
+  "github.com/golang-jwt/jwt/v5"
+)
+
+func main() {
+  keyPEM, err := os.ReadFile(os.Args[1])
+  if err != nil {
+    panic(err)
+  }
+  block, _ := pem.Decode(keyPEM)
+  if block == nil {
+    panic("invalid pem")
+  }
+  key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+  if err != nil {
+    parsed, err2 := x509.ParsePKCS8PrivateKey(block.Bytes)
+    if err2 != nil {
+      panic(err)
+    }
+    var ok bool
+    key, ok = parsed.(*rsa.PrivateKey)
+    if !ok {
+      panic("not an RSA private key")
+    }
+  }
+  now := time.Now().UTC()
+  token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+    "iss": "https://ci.local",
+    "aud": "secure-code-retrieval-mcp",
+    "sub": "ci-smoke",
+    "roles": []string{"scrm_admin"},
+    "iat": now.Unix(),
+    "exp": now.Add(15 * time.Minute).Unix(),
+    "jti": fmt.Sprintf("%d", now.UnixNano()),
+  })
+  signed, err := token.SignedString(key)
+  if err != nil {
+    panic(err)
+  }
+  fmt.Println(signed)
+}
+EOF
+
+          token="$(go run "$workdir/mint_jwt.go" "$workdir/private.pem")"
+          echo "workdir=$workdir" >>"$GITHUB_OUTPUT"
+          echo "token=$token" >>"$GITHUB_OUTPUT"
+
+      - name: Start container for smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d \
+            --name secure-code-retrieval-mcp-ci \
+            -p 18080:8080 \
+            -e SCRM_CONFIG=/work/config.yaml \
+            -v "${{ steps.smoke-config.outputs.workdir }}:/work" \
+            secure-code-retrieval-mcp:ci
+
+      - name: Wait for readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 20); do
+            if curl --silent --show-error http://127.0.0.1:18080/readyz | jq -e '.status == "ready"' >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs secure-code-retrieval-mcp-ci
+          exit 1
+
+      - name: Run MCP smoke test
+        env:
+          MCP_URL: http://127.0.0.1:18080/mcp
+          MCP_BEARER_TOKEN: ${{ steps.smoke-config.outputs.token }}
+        run: ./scripts/mcp-smoke-test.sh
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs secure-code-retrieval-mcp-ci
+
+      - name: Stop smoke test container
+        if: always()
+        run: docker rm -f secure-code-retrieval-mcp-ci || true
