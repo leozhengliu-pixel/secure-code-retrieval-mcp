@@ -1,15 +1,11 @@
 package mcp
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"log/slog"
-	"os"
-	"strconv"
+	"net/http"
 	"strings"
 
 	"secure-code-retrieval-mcp/internal/domain"
@@ -17,48 +13,74 @@ import (
 )
 
 type Server struct {
-	service      *gateway.Service
-	logger       *slog.Logger
-	defaultUser  string
-	defaultRoles []string
-	in           io.Reader
-	out          io.Writer
+	service *gateway.Service
+	logger  *slog.Logger
 }
 
-func NewServer(service *gateway.Service, logger *slog.Logger, defaultUser string, defaultRoles []string) *Server {
-	return &Server{service: service, logger: logger, defaultUser: defaultUser, defaultRoles: defaultRoles, in: os.Stdin, out: os.Stdout}
+func NewServer(service *gateway.Service, logger *slog.Logger) *Server {
+	return &Server{service: service, logger: logger}
 }
 
-func (s *Server) Serve(ctx context.Context) error {
-	reader := bufio.NewReader(s.in)
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		payload, err := readFrame(reader)
-		if err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return err
-		}
-		var req rpcRequest
-		if err := json.Unmarshal(payload, &req); err != nil {
-			return s.write(rpcResponse{JSONRPC: "2.0", Error: &rpcError{Code: -32700, Message: "parse error"}})
-		}
-		if req.Method == "" {
-			continue
-		}
-		resp := s.handle(ctx, req)
-		if req.ID == nil {
-			continue
-		}
-		if err := s.write(resp); err != nil {
-			return err
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	case http.MethodPost:
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, rpcResponse{
+			JSONRPC: "2.0",
+			Error:   &rpcError{Code: -32600, Message: "invalid request"},
+		})
+		return
+	}
+	if !acceptsMCPPost(r.Header.Get("Accept")) {
+		writeJSON(w, http.StatusNotAcceptable, rpcResponse{
+			JSONRPC: "2.0",
+			Error:   &rpcError{Code: -32600, Message: "invalid accept header"},
+		})
+		return
+	}
+
+	var raw json.RawMessage
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&raw); err != nil {
+		writeJSON(w, http.StatusBadRequest, rpcResponse{
+			JSONRPC: "2.0",
+			Error:   &rpcError{Code: -32700, Message: "parse error"},
+		})
+		return
+	}
+	requests, batch, hasRequest, err := decodeRPCRequests(raw)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, rpcResponse{
+			JSONRPC: "2.0",
+			Error:   &rpcError{Code: -32600, Message: "invalid request"},
+		})
+		return
+	}
+	if !hasRequest {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+
+	responses := make([]rpcResponse, 0, len(requests))
+	for _, req := range requests {
+		resp := s.handle(r.Context(), req)
+		if req.ID != nil {
+			responses = append(responses, resp)
 		}
 	}
+	w.Header().Set("Content-Type", "application/json")
+	if batch {
+		writeJSON(w, http.StatusOK, responses)
+		return
+	}
+	if len(responses) == 0 {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	writeJSON(w, http.StatusOK, responses[0])
 }
 
 func (s *Server) handle(ctx context.Context, req rpcRequest) rpcResponse {
@@ -118,34 +140,71 @@ func decodeParams(raw json.RawMessage, out any) error {
 	return json.Unmarshal(raw, out)
 }
 
-func (s *Server) write(resp rpcResponse) error {
-	payload, err := json.Marshal(resp)
-	if err != nil {
-		return err
-	}
-	_, err = fmt.Fprintf(s.out, "Content-Length: %d\r\n\r\n%s", len(payload), payload)
-	return err
+func acceptsMCPPost(header string) bool {
+	header = strings.ToLower(header)
+	return strings.Contains(header, "application/json") && strings.Contains(header, "text/event-stream")
 }
 
-func readFrame(reader *bufio.Reader) ([]byte, error) {
-	header, err := reader.ReadString('\n')
+func decodeRPCRequests(raw json.RawMessage) ([]rpcRequest, bool, bool, error) {
+	raw = json.RawMessage(bytesTrimSpace(raw))
+	if len(raw) == 0 {
+		return nil, false, false, errors.New("empty payload")
+	}
+	if raw[0] == '[' {
+		var items []json.RawMessage
+		if err := json.Unmarshal(raw, &items); err != nil {
+			return nil, false, false, err
+		}
+		requests := make([]rpcRequest, 0, len(items))
+		hasRequest := false
+		for _, item := range items {
+			req, isRequest, err := decodeSingleRPCRequest(item)
+			if err != nil {
+				return nil, true, false, err
+			}
+			if isRequest {
+				hasRequest = true
+			}
+			requests = append(requests, req)
+		}
+		return requests, true, hasRequest, nil
+	}
+	req, isRequest, err := decodeSingleRPCRequest(raw)
 	if err != nil {
-		return nil, err
+		return nil, false, false, err
 	}
-	if !strings.HasPrefix(strings.ToLower(header), "content-length:") {
-		return nil, fmt.Errorf("unexpected header: %s", header)
+	return []rpcRequest{req}, false, isRequest, nil
+}
+
+func decodeSingleRPCRequest(raw json.RawMessage) (rpcRequest, bool, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return rpcRequest{}, false, err
 	}
-	lengthValue := strings.TrimSpace(strings.TrimPrefix(header, "Content-Length:"))
-	length, err := strconv.Atoi(lengthValue)
-	if err != nil {
-		return nil, err
+	methodRaw, hasMethod := envelope["method"]
+	if !hasMethod {
+		return rpcRequest{}, false, nil
 	}
-	if _, err := reader.ReadString('\n'); err != nil {
-		return nil, err
+	var req rpcRequest
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		return rpcRequest{}, false, err
 	}
-	payload := make([]byte, length)
-	_, err = io.ReadFull(reader, payload)
-	return payload, err
+	_, hasID := envelope["id"]
+	var method string
+	if err := json.Unmarshal(methodRaw, &method); err != nil || method == "" {
+		return rpcRequest{}, false, errors.New("invalid method")
+	}
+	if !hasID {
+		req.ID = nil
+		return req, false, nil
+	}
+	return req, true, nil
+}
+
+func bytesTrimSpace(raw []byte) []byte {
+	return []byte(strings.TrimSpace(string(raw)))
 }
 
 func searchToolInputSchema() map[string]any {
@@ -226,6 +285,8 @@ func mapMCPError(err error) (int, string) {
 }
 
 func (s *Server) handleToolCall(ctx context.Context, id any, name string, arguments json.RawMessage) rpcResponse {
+	principal := domain.PrincipalFromContext(ctx)
+	roles := domain.RolesFromContext(ctx)
 	switch name {
 	case "code_search_secure":
 		var input gateway.SearchInput
@@ -237,8 +298,8 @@ func (s *Server) handleToolCall(ctx context.Context, id any, name string, argume
 		if input.CallerPrincipal != "" {
 			return rpcResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: -32602, Message: "caller_principal must not be supplied"}}
 		}
-		input.CallerPrincipal = s.defaultUser
-		input.CallerRoles = append([]string(nil), s.defaultRoles...)
+		input.CallerPrincipal = principal
+		input.CallerRoles = append([]string(nil), roles...)
 		ctx = domain.WithRequestMetadata(ctx, input.RequestID, input.CallerPrincipal, input.CallerRoles)
 		resp, err := s.service.Search(ctx, input)
 		if err != nil {
@@ -256,8 +317,8 @@ func (s *Server) handleToolCall(ctx context.Context, id any, name string, argume
 		if input.CallerPrincipal != "" {
 			return rpcResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: -32602, Message: "caller_principal must not be supplied"}}
 		}
-		input.CallerPrincipal = s.defaultUser
-		input.CallerRoles = append([]string(nil), s.defaultRoles...)
+		input.CallerPrincipal = principal
+		input.CallerRoles = append([]string(nil), roles...)
 		ctx = domain.WithRequestMetadata(ctx, input.RequestID, input.CallerPrincipal, input.CallerRoles)
 		resp, err := s.service.ReadFileWindow(ctx, input)
 		if err != nil {
@@ -280,4 +341,10 @@ func toolSuccessResponse(id any, payload any) rpcResponse {
 			"structuredContent": payload,
 		},
 	}
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
 }

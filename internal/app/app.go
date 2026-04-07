@@ -13,7 +13,6 @@ import (
 	ghconnector "secure-code-retrieval-mcp/internal/connectors/github"
 	glconnector "secure-code-retrieval-mcp/internal/connectors/gitlab"
 	"secure-code-retrieval-mcp/internal/gateway"
-	"secure-code-retrieval-mcp/internal/mcp"
 	"secure-code-retrieval-mcp/internal/metrics"
 	"secure-code-retrieval-mcp/internal/policy"
 	"secure-code-retrieval-mcp/internal/sanitize"
@@ -24,7 +23,6 @@ import (
 type Application struct {
 	logger     *slog.Logger
 	httpServer *http.Server
-	mcpServer  *mcp.Server
 }
 
 type auditRepository interface {
@@ -96,8 +94,7 @@ func New(cfg config.Config, logger *slog.Logger) (*Application, error) {
 		Handler:           withMetrics(NewHTTPHandler(svc, authService, readiness, logger), metricsRegistry),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	mcpServer := mcp.NewServer(svc, logger, cfg.Auth.MCPPrincipal, cfg.Auth.MCPRoles)
-	return &Application{logger: logger, httpServer: httpServer, mcpServer: mcpServer}, nil
+	return &Application{logger: logger, httpServer: httpServer}, nil
 }
 
 func openAuditStorage(cfg config.Config, logger *slog.Logger) (auditRepository, migrator, error) {
@@ -127,12 +124,6 @@ func (a *Application) Run(ctx context.Context) error {
 		httpErrCh <- nil
 	}()
 
-	mcpErrCh := make(chan error, 1)
-	go func() {
-		a.logger.Info("mcp server starting on stdio")
-		mcpErrCh <- a.mcpServer.Serve(ctx)
-	}()
-
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -141,13 +132,5 @@ func (a *Application) Run(ctx context.Context) error {
 		return nil
 	case err := <-httpErrCh:
 		return err
-	case err := <-mcpErrCh:
-		if err != nil && !errors.Is(err, context.Canceled) {
-			return err
-		}
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = a.httpServer.Shutdown(shutdownCtx)
-		return nil
 	}
 }

@@ -3,9 +3,11 @@ package mcp
 import (
 	"bytes"
 	"context"
-	"fmt"
+	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -13,119 +15,146 @@ import (
 	"secure-code-retrieval-mcp/internal/gateway"
 )
 
-func TestToolsCallReturnsStructuredContent(t *testing.T) {
-	input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"code_search_secure","arguments":{"policy_profile":"default","source_type":"github","source_host":"github.example.com","query_text":"hello","max_results":1,"response_mode":"snippet"}}}`
-	framed := []byte(fmt.Sprintf("Content-Length: %d\r\n\r\n%s", len(input), input))
-	in := bytes.NewBuffer(framed)
-	out := bytes.NewBuffer(nil)
-	server := &Server{
-		service: gateway.NewService(gateway.Dependencies{
-			Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
-			Timeout:   time.Second,
-			GitHub:    fakeConnector{},
-			GitLab:    fakeConnector{},
-			Policy:    fakePolicy{},
-			Sanitizer: fakeSanitizer{},
-			Auditor:   fakeAuditor{},
-		}),
-		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		defaultUser: "mcp_stdio",
-		in:          in,
-		out:         out,
+func TestInitializeReturnsCapabilities(t *testing.T) {
+	server := newTestServer()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`))
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req = req.WithContext(domain.WithRequestMetadata(req.Context(), "req_1", "alice", nil))
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
 	}
-	if err := server.Serve(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(out.Bytes(), []byte(`"structuredContent"`)) {
-		t.Fatalf("expected structured content response, got %s", out.String())
-	}
-}
-
-func TestToolsCallRejectsLegacyTenantField(t *testing.T) {
-	input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"code_search_secure","arguments":{"tenant_id":"legacy","policy_profile":"default","source_type":"github","source_host":"github.example.com","query_text":"hello","max_results":1,"response_mode":"snippet"}}}`
-	framed := []byte(fmt.Sprintf("Content-Length: %d\r\n\r\n%s", len(input), input))
-	in := bytes.NewBuffer(framed)
-	out := bytes.NewBuffer(nil)
-	server := &Server{
-		service: gateway.NewService(gateway.Dependencies{
-			Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
-			Timeout:              time.Second,
-			DefaultPolicyProfile: "default",
-			GitHub:               fakeConnector{},
-			GitLab:               fakeConnector{},
-			Policy:               fakePolicy{},
-			Sanitizer:            fakeSanitizer{},
-			Auditor:              fakeAuditor{},
-		}),
-		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		defaultUser: "mcp_stdio",
-		in:          in,
-		out:         out,
-	}
-	if err := server.Serve(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(out.Bytes(), []byte(`"invalid tool arguments"`)) {
-		t.Fatalf("expected legacy field rejection, got %s", out.String())
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"protocolVersion"`)) {
+		t.Fatalf("expected initialize payload, got %s", rec.Body.String())
 	}
 }
 
 func TestToolsListIncludesFileViewTool(t *testing.T) {
-	input := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
-	framed := []byte(fmt.Sprintf("Content-Length: %d\r\n\r\n%s", len(input), input))
-	in := bytes.NewBuffer(framed)
-	out := bytes.NewBuffer(nil)
-	server := &Server{
-		service: gateway.NewService(gateway.Dependencies{
-			Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
-			Timeout:              time.Second,
-			DefaultPolicyProfile: "default",
-			GitHub:               fakeConnector{},
-			GitLab:               fakeConnector{},
-			Policy:               fakePolicy{},
-			Sanitizer:            fakeSanitizer{},
-			Auditor:              fakeAuditor{},
-		}),
-		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		defaultUser: "mcp_stdio",
-		in:          in,
-		out:         out,
+	server := newTestServer()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req = req.WithContext(domain.WithRequestMetadata(req.Context(), "req_1", "alice", nil))
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
 	}
-	if err := server.Serve(context.Background()); err != nil {
-		t.Fatal(err)
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"code_view_secure"`)) {
+		t.Fatalf("expected code_view_secure in tools list, got %s", rec.Body.String())
 	}
-	if !bytes.Contains(out.Bytes(), []byte(`"code_view_secure"`)) {
-		t.Fatalf("expected code_view_secure in tools list, got %s", out.String())
+}
+
+func TestToolsCallReturnsStructuredContent(t *testing.T) {
+	server := newTestServer()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"code_search_secure","arguments":{"policy_profile":"default","source_type":"github","source_host":"github.example.com","query_text":"hello","max_results":1,"response_mode":"snippet"}}}`))
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req = req.WithContext(domain.WithRequestMetadata(req.Context(), "req_1", "alice", []string{"dev"}))
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"structuredContent"`)) {
+		t.Fatalf("expected structured content response, got %s", rec.Body.String())
+	}
+}
+
+func TestToolsCallRejectsLegacyTenantField(t *testing.T) {
+	server := newTestServer()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"code_search_secure","arguments":{"tenant_id":"legacy","policy_profile":"default","source_type":"github","source_host":"github.example.com","query_text":"hello","max_results":1,"response_mode":"snippet"}}}`))
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req = req.WithContext(domain.WithRequestMetadata(req.Context(), "req_1", "alice", nil))
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"invalid tool arguments"`)) {
+		t.Fatalf("expected legacy field rejection, got %s", rec.Body.String())
 	}
 }
 
 func TestFileViewToolReturnsStructuredContent(t *testing.T) {
-	input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"code_view_secure","arguments":{"policy_profile":"default","source_type":"github","source_host":"github.example.com","repository":"acme/repo","file_path":"main.go","ref":"main","start_line":1,"line_count":5}}}`
-	framed := []byte(fmt.Sprintf("Content-Length: %d\r\n\r\n%s", len(input), input))
-	in := bytes.NewBuffer(framed)
-	out := bytes.NewBuffer(nil)
-	server := &Server{
-		service: gateway.NewService(gateway.Dependencies{
-			Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
-			Timeout:              time.Second,
-			DefaultPolicyProfile: "default",
-			GitHub:               fakeConnector{},
-			GitLab:               fakeConnector{},
-			Policy:               fakePolicy{},
-			Sanitizer:            fakeSanitizer{},
-			Auditor:              fakeAuditor{},
-		}),
-		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		defaultUser: "mcp_stdio",
-		in:          in,
-		out:         out,
+	server := newTestServer()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"code_view_secure","arguments":{"policy_profile":"default","source_type":"github","source_host":"github.example.com","repository":"acme/repo","file_path":"main.go","ref":"main","start_line":1,"line_count":5}}}`))
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req = req.WithContext(domain.WithRequestMetadata(req.Context(), "req_1", "alice", nil))
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
 	}
-	if err := server.Serve(context.Background()); err != nil {
-		t.Fatal(err)
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"result"`)) {
+		t.Fatalf("expected file view structured content, got %s", rec.Body.String())
 	}
-	if !bytes.Contains(out.Bytes(), []byte(`"result"`)) {
-		t.Fatalf("expected file view structured content, got %s", out.String())
+}
+
+func TestMethodNotAllowed(t *testing.T) {
+	server := newTestServer()
+	req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	req = req.WithContext(domain.WithRequestMetadata(req.Context(), "req_1", "alice", nil))
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rec.Code)
 	}
+}
+
+func TestRejectsMissingStreamableAcceptHeader(t *testing.T) {
+	server := newTestServer()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+	req.Header.Set("Accept", "application/json")
+	req = req.WithContext(domain.WithRequestMetadata(req.Context(), "req_1", "alice", nil))
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotAcceptable {
+		t.Fatalf("expected 406, got %d", rec.Code)
+	}
+}
+
+func TestNotificationReturnsAcceptedWithoutBody(t *testing.T) {
+	server := newTestServer()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","method":"ping"}`))
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req = req.WithContext(domain.WithRequestMetadata(req.Context(), "req_1", "alice", nil))
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("expected empty body, got %s", rec.Body.String())
+	}
+}
+
+func TestBatchReturnsOnlyRequestResponses(t *testing.T) {
+	server := newTestServer()
+	body := `[{"jsonrpc":"2.0","method":"ping"},{"jsonrpc":"2.0","id":1,"method":"tools/list"}]`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(body))
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req = req.WithContext(domain.WithRequestMetadata(req.Context(), "req_1", "alice", nil))
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if !bytes.HasPrefix(bytes.TrimSpace(rec.Body.Bytes()), []byte("[")) {
+		t.Fatalf("expected batch response, got %s", rec.Body.String())
+	}
+}
+
+func newTestServer() *Server {
+	return NewServer(gateway.NewService(gateway.Dependencies{
+		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Timeout:              time.Second,
+		DefaultPolicyProfile: "default",
+		GitHub:               fakeConnector{},
+		GitLab:               fakeConnector{},
+		Policy:               fakePolicy{},
+		Sanitizer:            fakeSanitizer{},
+		Auditor:              fakeAuditor{},
+	}), slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 type fakeConnector struct{}
@@ -167,4 +196,17 @@ func (fakeAuditor) RecordDecision(context.Context, domain.AuditDecisionRecord) e
 func (fakeAuditor) RecordDelivery(context.Context, domain.AuditDeliveryRecord) error { return nil }
 func (fakeAuditor) GetBundle(context.Context, string) (domain.AuditBundle, error) {
 	return domain.AuditBundle{}, nil
+}
+
+func TestResponseIsValidJSON(t *testing.T) {
+	server := newTestServer()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req = req.WithContext(domain.WithRequestMetadata(req.Context(), "req_1", "alice", nil))
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("expected valid json, got %v", err)
+	}
 }

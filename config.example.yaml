@@ -19,8 +19,6 @@ auth:
   audience: secure-code-retrieval-mcp
   public_key_env: JWT_PUBLIC_KEY_PEM
   admin_role: scrm_admin
-  mcp_principal: mcp_stdio
-  mcp_roles: []
 default_policy_profile: default
 connectors:
   github:

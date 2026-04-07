@@ -37,13 +37,11 @@ type DatabaseConfig struct {
 }
 
 type AuthConfig struct {
-	Issuer       string   `yaml:"issuer"`
-	Audience     string   `yaml:"audience"`
-	PublicKeyPEM string   `yaml:"public_key_pem"`
-	PublicKeyEnv string   `yaml:"public_key_env"`
-	AdminRole    string   `yaml:"admin_role"`
-	MCPPrincipal string   `yaml:"mcp_principal"`
-	MCPRoles     []string `yaml:"mcp_roles"`
+	Issuer       string `yaml:"issuer"`
+	Audience     string `yaml:"audience"`
+	PublicKeyPEM string `yaml:"public_key_pem"`
+	PublicKeyEnv string `yaml:"public_key_env"`
+	AdminRole    string `yaml:"admin_role"`
 }
 
 type NetworkConfig struct {
@@ -229,9 +227,6 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Auth.AdminRole == "" {
 		c.Auth.AdminRole = "scrm_admin"
-	}
-	if c.Auth.MCPPrincipal == "" {
-		c.Auth.MCPPrincipal = "mcp_stdio"
 	}
 }
 

@@ -128,9 +128,6 @@ default_policy_profile: default
 		if cfg.Auth.AdminRole != "scrm_admin" {
 			t.Fatalf("expected default admin role, got %q", cfg.Auth.AdminRole)
 		}
-		if cfg.Auth.MCPPrincipal != "mcp_stdio" {
-			t.Fatalf("expected default mcp principal, got %q", cfg.Auth.MCPPrincipal)
-		}
 		return
 	}
 	t.Fatalf("expected defaults to apply before validation, got %v", err)

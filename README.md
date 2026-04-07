@@ -4,19 +4,17 @@ This repository now contains a runnable Go implementation of the MVP gateway des
 
 ## What it does
 
-- Exposes a minimal MCP server over stdio with the `code_search_secure` and `code_view_secure` tools
-- Exposes HTTP health endpoints and a small internal API:
+- Exposes an HTTP streamable MCP server at `POST /mcp` with the `code_search_secure` and `code_view_secure` tools
+- Exposes HTTP health and audit endpoints:
   - `GET /healthz`
   - `GET /readyz`
-  - `POST /v1/search`
-  - `POST /v1/file-view`
+  - `GET /metrics`
   - `GET /v1/audit/{request_id}`
 - Uses GitHub and GitLab native search APIs as retrieval backends
 - Applies policy-scoped deterministic policy evaluation and bounded sanitization
 - Persists audit request / decision / delivery records in local SQLite by default, or PostgreSQL when `database.dsn` is configured
 - Supports enterprise outbound proxy configuration with global defaults and per-connector / per-model overrides
-- Requires Bearer JWT for HTTP search and audit APIs
-- Exposes Prometheus metrics on `GET /metrics`
+- Requires Bearer JWT for HTTP MCP and audit APIs
 
 ## Run
 
@@ -32,9 +30,9 @@ Run `go test ./...`.
 
 ## Notes
 
-- MCP is implemented with stdio JSON-RPC framing and the minimal `initialize`, `tools/list`, `tools/call`, and `ping` methods required for the single-tool MVP.
+- MCP is implemented as an HTTP JSON-RPC endpoint at `/mcp` with the `initialize`, `tools/list`, `tools/call`, and `ping` methods.
 - `code_search_secure` returns policy-sanitized search evidence and optional digest summaries.
 - `code_view_secure` returns a policy-sanitized file window for an explicit `repository + file_path + ref + start_line + line_count`.
 - The service fails closed on missing or invalid auth, unsupported filters, missing policy profile, policy errors, and sanitization errors.
-- HTTP `POST /v1/search` derives `caller_principal` from JWT and does not accept caller identity in the request body.
+- `/mcp` derives `caller_principal` from JWT and does not accept caller identity in tool arguments.
 - HTTP `GET /readyz` returns structured JSON readiness state for auth, database, migrations, and connector config.

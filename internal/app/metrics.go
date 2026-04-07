@@ -2,6 +2,7 @@ package app
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"secure-code-retrieval-mcp/internal/metrics"
@@ -15,8 +16,12 @@ func withMetrics(next http.Handler, m *metrics.Metrics) http.Handler {
 		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recorder, r)
 		sourceType := "unknown"
-		if r.URL.Path == "/v1/search" {
-			sourceType = "search"
+		switch r.URL.Path {
+		case "/mcp":
+			sourceType = "mcp"
+		}
+		if strings.HasPrefix(r.URL.Path, "/v1/audit/") {
+			sourceType = "audit"
 		}
 		m.RequestTotal.WithLabelValues("http", sourceType, http.StatusText(recorder.status)).Inc()
 		m.RequestDuration.WithLabelValues("http", sourceType).Observe(time.Since(start).Seconds())

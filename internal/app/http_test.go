@@ -26,7 +26,8 @@ import (
 
 func TestSearchRequiresJWT(t *testing.T) {
 	handler := newTestHTTPHandler(t, testAuditor{})
-	req := httptest.NewRequest(http.MethodPost, "/v1/search", bytes.NewBufferString(`{}`))
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	req.Header.Set("Accept", "application/json, text/event-stream")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -34,14 +35,18 @@ func TestSearchRequiresJWT(t *testing.T) {
 	}
 }
 
-func TestSearchRejectsCallerPrincipalInBody(t *testing.T) {
+func TestMCPRejectsCallerPrincipalInBody(t *testing.T) {
 	handler := newTestHTTPHandler(t, testAuditor{})
-	req := httptest.NewRequest(http.MethodPost, "/v1/search", bytes.NewBufferString(`{"policy_profile":"default","caller_principal":"mallory","source_type":"github","source_host":"github.example.com","query_text":"hello","max_results":1,"response_mode":"snippet"}`))
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"code_search_secure","arguments":{"policy_profile":"default","caller_principal":"mallory","source_type":"github","source_host":"github.example.com","query_text":"hello","max_results":1,"response_mode":"snippet"}}}`))
+	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("Authorization", "Bearer "+testJWT(t, "alice", nil))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"caller_principal must not be supplied"`)) {
+		t.Fatalf("expected caller principal rejection, got %s", rec.Body.String())
 	}
 }
 
@@ -101,13 +106,57 @@ func TestReadyzReturnsStructuredFailure(t *testing.T) {
 	}
 }
 
-func TestFileViewRequiresJWT(t *testing.T) {
+func TestMCPHandlesToolsListWithJWT(t *testing.T) {
 	handler := newTestHTTPHandler(t, testAuditor{})
-	req := httptest.NewRequest(http.MethodPost, "/v1/file-view", bytes.NewBufferString(`{}`))
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+testJWT(t, "alice", nil))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401, got %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"code_search_secure"`)) {
+		t.Fatalf("expected tools list response, got %s", rec.Body.String())
+	}
+}
+
+func TestMCPRejectsMismatchedOrigin(t *testing.T) {
+	handler := newTestHTTPHandler(t, testAuditor{})
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+testJWT(t, "alice", nil))
+	req.Header.Set("Origin", "http://evil.example.com")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rec.Code)
+	}
+}
+
+func TestMCPAllowsMatchingOrigin(t *testing.T) {
+	handler := newTestHTTPHandler(t, testAuditor{})
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+testJWT(t, "alice", nil))
+	req.Header.Set("Origin", "http://127.0.0.1:8080")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestLegacyJSONEndpointsRemoved(t *testing.T) {
+	handler := newTestHTTPHandler(t, testAuditor{})
+	for _, endpoint := range []string{"/v1/search", "/v1/file-view"} {
+		req := httptest.NewRequest(http.MethodPost, endpoint, bytes.NewBufferString(`{}`))
+		req.Header.Set("Authorization", "Bearer "+testJWT(t, "alice", nil))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("expected 404 for %s, got %d", endpoint, rec.Code)
+		}
 	}
 }
 
