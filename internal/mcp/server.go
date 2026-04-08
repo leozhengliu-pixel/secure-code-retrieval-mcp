@@ -6,7 +6,9 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"secure-code-retrieval-mcp/internal/domain"
 	"secure-code-retrieval-mcp/internal/gateway"
@@ -17,17 +19,36 @@ type Server struct {
 	logger  *slog.Logger
 }
 
+const maxFileViewLineCount = 80
+const (
+	defaultBrowseDepth      = 1
+	maxBrowseDepth          = 3
+	defaultBrowseMaxEntries = 100
+	maxBrowseMaxEntries     = 200
+)
+
 func NewServer(service *gateway.Service, logger *slog.Logger) *Server {
 	return &Server{service: service, logger: logger}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	requestID := domain.RequestIDFromContext(r.Context())
+	principal := domain.PrincipalFromContext(r.Context())
+	defer func() {
+		if rec := recover(); rec != nil {
+			s.logger.Error("mcp transport panic", "request_id", requestID, "caller_principal", principal, "panic", rec)
+			panic(rec)
+		}
+	}()
 	switch r.Method {
 	case http.MethodGet:
+		s.logTransport(r, requestID, principal, start, http.StatusMethodNotAllowed, "method_not_allowed", nil, nil, 0, 0)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	case http.MethodPost:
 	default:
+		s.logTransport(r, requestID, principal, start, http.StatusMethodNotAllowed, "invalid_request", nil, nil, 0, 0)
 		writeJSON(w, http.StatusMethodNotAllowed, rpcResponse{
 			JSONRPC: "2.0",
 			Error:   &rpcError{Code: -32600, Message: "invalid request"},
@@ -35,6 +56,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !acceptsMCPPost(r.Header.Get("Accept")) {
+		s.logTransport(r, requestID, principal, start, http.StatusNotAcceptable, "invalid_accept_header", nil, nil, 0, 0)
 		writeJSON(w, http.StatusNotAcceptable, rpcResponse{
 			JSONRPC: "2.0",
 			Error:   &rpcError{Code: -32600, Message: "invalid accept header"},
@@ -45,6 +67,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var raw json.RawMessage
 	decoder := json.NewDecoder(r.Body)
 	if err := decoder.Decode(&raw); err != nil {
+		s.logTransport(r, requestID, principal, start, http.StatusBadRequest, "parse_error", nil, nil, 0, 0)
 		writeJSON(w, http.StatusBadRequest, rpcResponse{
 			JSONRPC: "2.0",
 			Error:   &rpcError{Code: -32700, Message: "parse error"},
@@ -53,6 +76,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	requests, batch, hasRequest, err := decodeRPCRequests(raw)
 	if err != nil {
+		s.logTransport(r, requestID, principal, start, http.StatusBadRequest, "invalid_request", nil, nil, 0, 0)
 		writeJSON(w, http.StatusBadRequest, rpcResponse{
 			JSONRPC: "2.0",
 			Error:   &rpcError{Code: -32600, Message: "invalid request"},
@@ -60,10 +84,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !hasRequest {
+		methods, tools, notifications := summarizeRPCRequests(requests)
+		s.logTransport(r, requestID, principal, start, http.StatusAccepted, "accepted_notification", methods, tools, len(requests), notifications)
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 
+	methods, tools, notifications := summarizeRPCRequests(requests)
 	responses := make([]rpcResponse, 0, len(requests))
 	for _, req := range requests {
 		resp := s.handle(r.Context(), req)
@@ -73,13 +100,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if batch {
+		s.logTransport(r, requestID, principal, start, http.StatusOK, logOutcomeFromResponses(responses), methods, tools, len(requests), notifications)
 		writeJSON(w, http.StatusOK, responses)
 		return
 	}
 	if len(responses) == 0 {
+		s.logTransport(r, requestID, principal, start, http.StatusAccepted, "accepted_notification", methods, tools, len(requests), notifications)
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
+	s.logTransport(r, requestID, principal, start, http.StatusOK, logOutcomeFromResponses(responses), methods, tools, len(requests), notifications)
 	writeJSON(w, http.StatusOK, responses[0])
 }
 
@@ -103,13 +133,18 @@ func (s *Server) handle(ctx context.Context, req rpcRequest) rpcResponse {
 				"tools": []map[string]any{
 					{
 						"name":        "code_search_secure",
-						"description": "Search enterprise code and return policy-sanitized snippets",
+						"description": "Search enterprise code by keyword or topic and return policy-sanitized snippets. Use this for content search, not for listing repository directories.",
 						"inputSchema": searchToolInputSchema(),
 					},
 					{
 						"name":        "code_view_secure",
-						"description": "Read a policy-sanitized file window from enterprise code",
+						"description": "Read a policy-sanitized file window from enterprise code when file_path is already known. If the path is unknown, call code_browse_secure first. start_line must be >= 1 and line_count must be between 1 and 80. Use multiple calls for larger files.",
 						"inputSchema": fileViewToolInputSchema(),
+					},
+					{
+						"name":        "code_browse_secure",
+						"description": "Browse repository directories and file metadata before reading specific files. This tool returns metadata only, not file contents. Use it to discover paths, then call code_view_secure to read a file and code_search_secure for topic search.",
+						"inputSchema": browseToolInputSchema(),
 					},
 				},
 			},
@@ -122,7 +157,7 @@ func (s *Server) handle(ctx context.Context, req rpcRequest) rpcResponse {
 		if err := decodeParams(req.Params, &params); err != nil {
 			return rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32602, Message: "invalid params"}}
 		}
-		if params.Name != "code_search_secure" && params.Name != "code_view_secure" {
+		if params.Name != "code_search_secure" && params.Name != "code_view_secure" && params.Name != "code_browse_secure" {
 			return rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32601, Message: "tool not found"}}
 		}
 		return s.handleToolCall(ctx, req.ID, params.Name, params.Arguments)
@@ -209,35 +244,50 @@ func bytesTrimSpace(raw []byte) []byte {
 
 func searchToolInputSchema() map[string]any {
 	return map[string]any{
-		"type":     "object",
-		"required": []string{"source_type", "source_host", "query_text", "max_results", "response_mode"},
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []string{"source_type", "source_host", "query_text", "max_results", "response_mode"},
 		"properties": map[string]any{
-			"request_id":     map[string]string{"type": "string"},
+			"request_id":     map[string]any{"type": "string"},
 			"source_type":    map[string]any{"type": "string", "enum": []string{string(domain.SourceTypeGitHub), string(domain.SourceTypeGitLab)}},
-			"source_host":    map[string]string{"type": "string"},
-			"query_text":     map[string]string{"type": "string"},
-			"max_results":    map[string]string{"type": "integer"},
-			"policy_profile": map[string]string{"type": "string"},
+			"source_host":    map[string]any{"type": "string"},
+			"query_text":     map[string]any{"type": "string"},
+			"max_results":    map[string]any{"type": "integer", "minimum": 1},
+			"policy_profile": map[string]any{"type": "string"},
 			"response_mode":  map[string]any{"type": "string", "enum": []string{string(domain.ResponseModeSnippet), string(domain.ResponseModeSummary)}},
-			"filters":        map[string]any{"type": "object"},
+			"filters": map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]any{
+					"repositories":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"organizations": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"groups":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"paths":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"extensions":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"languages":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"page":          map[string]any{"type": "integer", "minimum": 1},
+					"per_page":      map[string]any{"type": "integer", "minimum": 1},
+				},
+			},
 		},
 	}
 }
 
 func fileViewToolInputSchema() map[string]any {
 	return map[string]any{
-		"type":     "object",
-		"required": []string{"source_type", "source_host", "repository", "file_path", "ref", "start_line", "line_count"},
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []string{"source_type", "source_host", "repository", "file_path", "ref", "start_line", "line_count"},
 		"properties": map[string]any{
-			"request_id":     map[string]string{"type": "string"},
+			"request_id":     map[string]any{"type": "string"},
 			"source_type":    map[string]any{"type": "string", "enum": []string{string(domain.SourceTypeGitHub), string(domain.SourceTypeGitLab)}},
-			"source_host":    map[string]string{"type": "string"},
-			"repository":     map[string]string{"type": "string"},
-			"file_path":      map[string]string{"type": "string"},
-			"ref":            map[string]string{"type": "string"},
-			"start_line":     map[string]string{"type": "integer"},
-			"line_count":     map[string]string{"type": "integer"},
-			"policy_profile": map[string]string{"type": "string"},
+			"source_host":    map[string]any{"type": "string"},
+			"repository":     map[string]any{"type": "string"},
+			"file_path":      map[string]any{"type": "string"},
+			"ref":            map[string]any{"type": "string"},
+			"start_line":     map[string]any{"type": "integer", "minimum": 1},
+			"line_count":     map[string]any{"type": "integer", "minimum": 1, "maximum": maxFileViewLineCount},
+			"policy_profile": map[string]any{"type": "string"},
 		},
 	}
 }
@@ -269,8 +319,14 @@ func mapMCPError(err error) (int, string) {
 		return -32001, "unauthorized"
 	case errors.Is(err, domain.ErrForbidden):
 		return -32003, "forbidden"
+	case errors.Is(err, domain.ErrNotFound):
+		return -32004, "not_found"
 	case errors.Is(err, domain.ErrUnsupportedFilter):
 		return -32022, "unsupported_filter"
+	case isConnectorTimeout(err):
+		return -32051, "connector_timeout"
+	case isConnectorRateLimited(err):
+		return -32052, "rate_limited"
 	case errors.Is(err, domain.ErrConnector), errors.Is(err, domain.ErrProxyAuth), errors.Is(err, domain.ErrProxyTimeout), errors.Is(err, domain.ErrProxyConnect):
 		return -32050, "connector_error"
 	case errors.Is(err, domain.ErrPolicyEvaluation):
@@ -282,6 +338,27 @@ func mapMCPError(err error) (int, string) {
 	default:
 		return -32000, "internal_error"
 	}
+}
+
+func isConnectorTimeout(err error) bool {
+	if errors.Is(err, domain.ErrProxyTimeout) {
+		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if !errors.Is(err, domain.ErrConnector) {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "timeout")
+}
+
+func isConnectorRateLimited(err error) bool {
+	if !errors.Is(err, domain.ErrConnector) {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "rate limit") || strings.Contains(text, "rate limited")
 }
 
 func (s *Server) handleToolCall(ctx context.Context, id any, name string, arguments json.RawMessage) rpcResponse {
@@ -326,8 +403,46 @@ func (s *Server) handleToolCall(ctx context.Context, id any, name string, argume
 			return rpcResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: code, Message: payload}}
 		}
 		return toolSuccessResponse(id, resp)
+	case "code_browse_secure":
+		var input gateway.BrowseInput
+		decoder := json.NewDecoder(strings.NewReader(string(arguments)))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&input); err != nil {
+			return rpcResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: -32602, Message: "invalid tool arguments"}}
+		}
+		if input.CallerPrincipal != "" {
+			return rpcResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: -32602, Message: "caller_principal must not be supplied"}}
+		}
+		input.CallerPrincipal = principal
+		input.CallerRoles = append([]string(nil), roles...)
+		ctx = domain.WithRequestMetadata(ctx, input.RequestID, input.CallerPrincipal, input.CallerRoles)
+		resp, err := s.service.BrowseRepository(ctx, input)
+		if err != nil {
+			code, payload := mapMCPError(err)
+			return rpcResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: code, Message: payload}}
+		}
+		return toolSuccessResponse(id, resp)
 	default:
 		return rpcResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: -32601, Message: "tool not found"}}
+	}
+}
+
+func browseToolInputSchema() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []string{"source_type", "source_host", "repository"},
+		"properties": map[string]any{
+			"request_id":     map[string]any{"type": "string"},
+			"source_type":    map[string]any{"type": "string", "enum": []string{string(domain.SourceTypeGitHub), string(domain.SourceTypeGitLab)}},
+			"source_host":    map[string]any{"type": "string"},
+			"repository":     map[string]any{"type": "string"},
+			"path":           map[string]any{"type": "string"},
+			"ref":            map[string]any{"type": "string"},
+			"policy_profile": map[string]any{"type": "string"},
+			"depth":          map[string]any{"type": "integer", "minimum": defaultBrowseDepth, "maximum": maxBrowseDepth, "default": defaultBrowseDepth},
+			"max_entries":    map[string]any{"type": "integer", "minimum": 1, "maximum": maxBrowseMaxEntries, "default": defaultBrowseMaxEntries},
+		},
 	}
 }
 
@@ -347,4 +462,82 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func (s *Server) logTransport(r *http.Request, requestID, principal string, start time.Time, status int, outcome string, methods, tools []string, batchSize, notifications int) {
+	if s.logger == nil {
+		return
+	}
+	attrs := []any{
+		"request_id", requestID,
+		"caller_principal", principal,
+		"transport", "http_streamable",
+		"http_method", r.Method,
+		"path", r.URL.Path,
+		"status", status,
+		"outcome", outcome,
+		"batch", batchSize > 1,
+		"batch_size", batchSize,
+		"notification_count", notifications,
+		"duration_ms", time.Since(start).Milliseconds(),
+		"remote_addr", r.RemoteAddr,
+	}
+	if len(methods) > 0 {
+		attrs = append(attrs, "rpc_methods", methods)
+	}
+	if len(tools) > 0 {
+		attrs = append(attrs, "tool_names", tools)
+	}
+	s.logger.Info("mcp request completed", attrs...)
+}
+
+func summarizeRPCRequests(requests []rpcRequest) ([]string, []string, int) {
+	methods := make([]string, 0, len(requests))
+	tools := make([]string, 0)
+	notifications := 0
+	for _, req := range requests {
+		methods = append(methods, req.Method)
+		if req.ID == nil {
+			notifications++
+		}
+		if req.Method == "tools/call" {
+			if toolName := extractToolName(req.Params); toolName != "" {
+				tools = append(tools, toolName)
+			}
+		}
+	}
+	return methods, tools, notifications
+}
+
+func extractToolName(raw json.RawMessage) string {
+	var params struct {
+		Name string `json:"name"`
+	}
+	if err := decodeParams(raw, &params); err != nil {
+		return ""
+	}
+	return params.Name
+}
+
+func logOutcomeFromResponses(responses []rpcResponse) string {
+	if len(responses) == 0 {
+		return "accepted_notification"
+	}
+	errorsSeen := 0
+	errorCodes := make([]string, 0, len(responses))
+	for _, resp := range responses {
+		if resp.Error == nil {
+			continue
+		}
+		errorsSeen++
+		errorCodes = append(errorCodes, strconv.Itoa(resp.Error.Code))
+	}
+	switch {
+	case errorsSeen == 0:
+		return "ok"
+	case errorsSeen == len(responses):
+		return "rpc_error:" + strings.Join(errorCodes, ",")
+	default:
+		return "partial_rpc_error:" + strings.Join(errorCodes, ",")
+	}
 }
